@@ -12,7 +12,11 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
 
 
 def session(cols, rows, steps):
-    """在 pty 里跑 `catbus tui`，依次执行 steps，返回 (输出, 是否已退出, 退出状态)。"""
+    """在 pty 里跑 `catbus tui`，依次执行 steps，返回 (输出, 是否已退出, 退出状态)。
+
+    等待都是“等条件成立，最多等多久”，不是睡固定时间：CI 的虚拟机（尤其 macOS）又慢又抖，
+    固定的 0.7 秒窗口会让“按 q 之后进程有没有退出”这类检查偶尔失败。
+    """
     home = tempfile.mkdtemp(prefix="catbus-smoke-tui-")
     pid, fd = pty.fork()
     if pid == 0:
@@ -20,37 +24,59 @@ def session(cols, rows, steps):
         os.execvpe(CMD[0], CMD + ["tui"], env)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     buf = b""
+    state = {"exited": False, "status": 0}
 
-    def drain(seconds):
+    def reap():
+        """非阻塞地看子进程退出了没有。"""
+        if state["exited"]:
+            return True
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done != 0:
+            state["exited"], state["status"] = True, status
+        return state["exited"]
+
+    def drain(seconds, until=None):
+        """读 pty 输出，最多 seconds 秒；until 成立（或子进程退出）就提前返回。"""
         nonlocal buf
         end = time.time() + seconds
         while time.time() < end:
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if not r:
-                continue
-            try:
-                data = os.read(fd, 65536)
-            except OSError:
+            r, _, _ = select.select([fd], [], [], 0.05)
+            if r:
+                try:
+                    data = os.read(fd, 65536)
+                except OSError:
+                    reap()
+                    return
+                if not data:
+                    reap()
+                    return
+                buf += data
+            if until is not None and until():
                 return
-            if not data:
+            if reap():
                 return
-            buf += data
 
-    drain(2.5)  # 冷启动（加载 Ink、React、Yoga）在慢机器上要几秒
-    for step in steps:
+    # 冷启动（加载 Ink、React、Yoga）：等首页画出来，最多 20 秒；一般不到 1 秒
+    drain(20, until=lambda: "平台".encode() in buf)
+    for i, step in enumerate(steps):
+        before = len(buf)
         if step[0] == "send":
             os.write(fd, step[1].encode())
         elif step[0] == "resize":
             fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", step[2], step[1], 0, 0))
             os.kill(pid, signal.SIGWINCH)
-        drain(0.7)
-    drain(0.5)
-    done, status = os.waitpid(pid, os.WNOHANG)
-    exited = done != 0
+        # 每一步之后：等到有新的输出（界面重绘了），再多给 0.3 秒让它画完；进程退出了就不用等
+        drain(5, until=lambda: len(buf) > before)
+        drain(0.3)
+        if state["exited"]:
+            break
+    # 最后一步如果是退出键：最多再等 10 秒让进程自己退出
+    drain(10, until=reap)
+    exited = reap()
     if not exited:
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
-    return buf.decode("utf8", "replace"), exited, status
+    return buf.decode("utf8", "replace"), exited, state["status"]
 
 
 failed = 0
