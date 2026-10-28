@@ -21,6 +21,9 @@ export async function runTui(): Promise<number> {
   const logs = new LogBuffer()
   const restoreStderr = captureStderr(logs)
   const look = pickLook(process.env)
+  // 在 render 之前提前开启 raw mode，消除"首页画出来但还不能收键"的时间窗口。
+  // Ink 会在 useInput 挂载时再开一次（引用计数），卸载时关掉。这里开的这一次会在 render 返回前被 Ink 接管。
+  if (process.stdin.setRawMode) process.stdin.setRawMode(true)
   try {
     const app = render(<App look={look} logs={logs} />, {
       alternateScreen: true,
