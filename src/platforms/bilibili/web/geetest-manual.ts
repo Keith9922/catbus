@@ -174,7 +174,8 @@ export async function manualGeetest(ctx: HandlerContext, gt: string, challenge: 
     })
   }
   const s = await serveManual(gt, challenge, { ...options, signal: ctx.signal })
-  showLink(s.url, `请在浏览器打开下面的链接完成人机验证（${options.timeout ?? TIMEOUT} 秒内），完成后自动继续`)
+  const seconds = options.timeout ?? TIMEOUT
+  showLink(s.url, `请在浏览器打开下面的链接完成人机验证（${seconds} 秒内），完成后自动继续`, `请在浏览器打开 ${s.url} 完成人机验证（${seconds} 秒内），完成后自动继续`)
   try {
     return await s.result
   } finally {

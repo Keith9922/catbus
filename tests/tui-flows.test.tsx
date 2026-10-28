@@ -292,18 +292,19 @@ describe('人机验证的浏览器链接', () => {
     const original = process.stderr.write
     process.stderr.write = ((c: string | Uint8Array) => (written.push(String(c)), true)) as typeof process.stderr.write
     try {
-      showLink('http://127.0.0.1:5555', '请在浏览器打开下面的链接完成人机验证（180 秒内），完成后自动继续')
+      showLink('http://127.0.0.1:5555', '说明', '请在浏览器打开 http://127.0.0.1:5555 完成人机验证（180 秒内），完成后自动继续')
     } finally {
       process.stderr.write = original
     }
-    expect(written.join('')).toBe('[catbus] 请在浏览器打开下面的链接完成人机验证（180 秒内），完成后自动继续：http://127.0.0.1:5555\n')
+    // 与改动前 geetest-manual.ts 里直写的那一行逐字一致
+    expect(written.join('')).toBe('[catbus] 请在浏览器打开 http://127.0.0.1:5555 完成人机验证（180 秒内），完成后自动继续\n')
 
     // 界面：走钩子，stderr 不写
     const seen: string[] = []
     const undo = setLoginUi({ interactive: true, signal: new AbortController().signal, qrcode() {}, prompt: async () => '', link: (url, hint) => seen.push(url + '|' + hint) })
     process.stderr.write = ((c: string | Uint8Array) => (written.push('LEAK ' + String(c)), true)) as typeof process.stderr.write
     try {
-      showLink('http://127.0.0.1:6666', 'h')
+      showLink('http://127.0.0.1:6666', 'h', 'cli 文案')
     } finally {
       process.stderr.write = original
       undo()
@@ -327,7 +328,7 @@ describe('人机验证的浏览器链接', () => {
               upstream: 'full',
               handler: async () => async (ctx: HandlerContext) => {
                 const credential = freshCredential(ctx, 'sms' as never)
-                showLink('http://127.0.0.1:7777/verify', '请在浏览器打开下面的链接完成人机验证（180 秒内），完成后自动继续')
+                showLink('http://127.0.0.1:7777/verify', '请在浏览器打开下面的链接完成人机验证（180 秒内），完成后自动继续', 'cli 文案')
                 await poll(async () => undefined, { interval: 20 })
                 return finishLogin(ctx, credential, { id: 'u', name: 'n', url: null })
               },

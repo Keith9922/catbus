@@ -109,12 +109,12 @@ export function cookieCredential(ctx: HandlerContext, defaultDomain: string): Cr
 }
 
 /**
- * 请用户在浏览器里打开一个链接（人机验证）。界面里走钩子，显示链接并可按 o 打开；
- * CLI 里写到 stderr（-q 也显示，这一步必须由用户操作）。
+ * 请用户在浏览器里打开一个链接（人机验证）。界面里走钩子：链接单独显示、可按 o 打开，hint 是不含链接的说明；
+ * CLI 里原样写到 stderr（-q 也显示，这一步必须由用户操作），文案由调用方给出，保持和以前逐字一致。
  */
-export function showLink(url: string, hint: string): void {
+export function showLink(url: string, hint: string, cliLine: string): void {
   if (ui) ui.link(url, hint)
-  else process.stderr.write(`[catbus] ${hint}：${url}\n`)
+  else process.stderr.write(`[catbus] ${cliLine}\n`)
 }
 
 /** 二维码：画到 stderr，同时把 PNG 存到 cache/<p>/qrcode.png。 */
