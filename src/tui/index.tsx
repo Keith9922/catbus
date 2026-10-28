@@ -24,6 +24,10 @@ export async function runTui(): Promise<number> {
   try {
     const app = render(<App look={look} logs={logs} />, {
       alternateScreen: true,
+      // 上面 checkTerminal 已经确认 stdin 和 stdout 都是 TTY。Ink 默认还会因为环境变量 CI 非空就当作非交互：
+      // 那样既没有备用屏幕、光标控制，也不处理窗口缩放，界面会直接打在滚动区里。有些容器和开发环境会常设 CI=true，
+      // 这里不让它覆盖我们已经做过的判断。
+      interactive: true,
       exitOnCtrlC: false,
       patchConsole: false,
       // Windows 控制台整屏时 Ink 每帧都会清屏重绘，所以限制帧率，避免闪烁
