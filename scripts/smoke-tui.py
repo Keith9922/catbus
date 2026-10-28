@@ -80,12 +80,27 @@ def session(cols, rows, steps):
         drain(0.3)
         if state["exited"]:
             break
-    # 最后一步如果是退出键：最多再等 10 秒让进程自己退出
+    # 最后一步如果是退出键：最多再等 10 秒让进程自己退出。
+    # 注意：drain 内部每次循环都会尝试 reap，但在某些环境里 waitpid(WNOHANG) 可能有延迟；
+    # drain 结束后，做一次阻塞的 wait 确保捕获退出状态。
     drain(10, until=reap)
-    exited = reap()
+    if not state["exited"]:
+        # drain 里的非阻塞 wait 没捕获到，现在阻塞地等（最多 1 秒，之后杀掉）
+        try:
+            done, status = os.waitpid(pid, 0)  # 阻塞
+            if done == pid:
+                state["exited"], state["status"] = True, status
+        except ChildProcessError:
+            pass  # 进程已经被 reap 了
+        except Exception:
+            pass
+    exited = state["exited"]
     if not exited:
-        os.kill(pid, signal.SIGKILL)
-        os.waitpid(pid, 0)
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except Exception:
+            pass
     return buf.decode("utf8", "replace"), exited, state["status"]
 
 
