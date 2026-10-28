@@ -56,8 +56,18 @@ def session(cols, rows, steps):
             if reap():
                 return
 
-    # 冷启动（加载 Ink、React、Yoga）：等首页画出来，最多 20 秒；一般不到 1 秒
-    drain(20, until=lambda: "平台".encode() in buf)
+    def raw_mode():
+        """终端是否已被程序切到原始模式（ICANON 关掉）。读 pty 主端的 termios 就能看到。"""
+        try:
+            return not (termios.tcgetattr(fd)[3] & termios.ICANON)
+        except termios.error:
+            return False
+
+    # 冷启动（加载 Ink、React、Yoga）：要等首页画出来，并且终端已经进入原始模式，最多 20 秒。
+    # 只看“画出来了”不够：Ink 先画首页、之后才打开原始模式，两者之间终端还是行缓冲，
+    # 这时发的 q 要等回车才会交给程序，Ctrl-C 会被终端直接变成 SIGINT。慢的 CI 虚拟机上这个间隔会变长，
+    # 脚本正好在这时按键，就看到“按了 q 进程没退出”。
+    drain(20, until=lambda: "平台".encode() in buf and raw_mode())
     for i, step in enumerate(steps):
         before = len(buf)
         if step[0] == "send":
