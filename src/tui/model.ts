@@ -11,6 +11,12 @@ export const READ_ACTIONS: ReadonlySet<string> = new Set([
   'status', 'price', 'likes', 'collects', 'reposts', 'followers', 'following', 'rank', 'gifts', 'products', 'replays', 'subtitles', 'stats',
 ])
 
+/**
+ * 界面里能运行的下载动作（AGENTS 4.13）：只把文件写到本机，不改平台上的数据，所以不需要 4.11 的确认。
+ * 和读取类动作分开放：规范和在线测试里的“读取类”只指 READ_ACTIONS。
+ */
+export const DOWNLOAD_ACTIONS: ReadonlySet<string> = new Set(['download'])
+
 /** 登录方式的中文名（登录页的选项、账号页的方式列）。 */
 export const METHOD_LABEL: Record<LoginMethod, string> = {
   qrcode: '扫码',
@@ -21,11 +27,11 @@ export const METHOD_LABEL: Record<LoginMethod, string> = {
   apikey: 'API Key',
 }
 
-/** 能在界面里一次取回结果：已实现、动作在读取类集合里，且不是长连接、不需要确认。 */
+/** 能在界面里一次取回结果：已实现、动作是读取类或下载，且不是长连接、不需要确认。 */
 export function runnable(command: Command): boolean {
   if (command.status !== 'implemented') return false
   if (command.stream || command.confirm) return false
-  return READ_ACTIONS.has(command.action)
+  return READ_ACTIONS.has(command.action) || DOWNLOAD_ACTIONS.has(command.action)
 }
 
 /** 长连接的监听：界面里显示成滚动的事件流（AGENTS 4.13）。 */
@@ -55,6 +61,17 @@ export interface Group {
 export function webEndpoint(platform: Platform): AvailableEndpoint | null {
   const ep = platform.endpoints.web
   return ep === 'planned' ? null : ep
+}
+
+/** 本平台 web 端能在界面里运行的某条命令；没有或不能运行时为 null。 */
+export function runnableCommand(platform: Platform, key: string): Command | null {
+  const c = webEndpoint(platform)?.commands.get(key)
+  return c && runnable(c) ? c : null
+}
+
+/** 平台的“搜索”入口（按 s、聚合搜索用）：能运行的 item search；没有就用推荐流 feed list；都没有为 null。 */
+export function primaryCommand(platform: Platform): Command | null {
+  return runnableCommand(platform, 'item search') ?? runnableCommand(platform, 'feed list')
 }
 
 /** 按 resource 分组，顺序与 `--help` 一致；auth 不在命令栏里出现（登录在终端里做）。 */

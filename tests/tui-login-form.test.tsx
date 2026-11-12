@@ -167,7 +167,7 @@ describe('账号页：操作成功但刷新列表失败', () => {
     try {
       await s.press('a')
       await s.waitForText('小号')
-            // 目录可写、可进入，但不可列出：写 _current 能成功，之后列出账号会失败
+      // 目录可写、可进入，但不可列出：写 _current 能成功，之后列出账号会失败
       chmodSync(dir, 0o300)
       await s.press(KEYS.enter) // 设为当前账号
       await s.waitForText('读取账号列表失败')

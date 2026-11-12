@@ -1,7 +1,7 @@
 import { CatbusError } from '../core/errors.js'
 import type { Logger } from '../core/log.js'
 import type { Command, Page, Platform } from '../core/registry.js'
-import { invoke, splitCursor } from '../cli/exec.js'
+import { type Invocation, invoke, splitCursor } from '../cli/exec.js'
 import { runnable } from './model.js'
 
 // 在进程内运行一条读取类命令，返回结构化结果（AGENTS 4.13）。
@@ -26,6 +26,8 @@ export interface RunRequest {
   cursor?: string | null
   log: Logger
   signal?: AbortSignal
+  /** 相当于 `-a <账号>`：本次浏览用的账号；不给时用当前账号。 */
+  account?: string
 }
 
 export async function runCommand(req: RunRequest): Promise<RunResult> {
@@ -41,7 +43,9 @@ export async function runCommand(req: RunRequest): Promise<RunResult> {
   const given = { ...req.given }
   if (cursor != null) given.cursor = cursor
   const signal = req.signal ?? new AbortController().signal
-  const { data, account } = await invoke({ platform, command, words: req.words, given, log, signal })
+  const inv: Invocation = { platform, command, words: req.words, given, log, signal }
+  if (req.account) inv.account = req.account
+  const { data, account } = await invoke(inv)
   if (command.paged) {
     const result = data as { data: unknown[]; page: Page }
     return { data: result.data.slice(skip), page: result.page, account }

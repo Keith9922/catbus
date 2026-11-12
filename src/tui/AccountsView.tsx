@@ -20,7 +20,24 @@ export interface AccountsState {
 
 const METHOD: Record<string, string> = { ...METHOD_LABEL, guest: '游客' }
 
-export function AccountsView({ platform, state, cols, rows, canLogin, note }: { platform: Platform; state: AccountsState; cols: number; rows: number; canLogin: boolean; note: string | null }) {
+export function AccountsView({
+  platform,
+  state,
+  cols,
+  rows,
+  canLogin,
+  note,
+  browsing,
+}: {
+  platform: Platform
+  state: AccountsState
+  cols: number
+  rows: number
+  canLogin: boolean
+  note: string | null
+  /** 本次浏览用的账号（按 b 选的）；没有为 null。 */
+  browsing: string | null
+}) {
   const g = useGlyphs()
   const inner = cols - 2
   const list = state.rows
@@ -54,7 +71,8 @@ export function AccountsView({ platform, state, cols, rows, canLogin, note }: { 
             left={
               <>
                 <T c={a.active ? 'green' : 'dim'}>{a.active ? g.dotOn : g.dotOff}</T> {a.account}
-                <T c="sub">{'  ' + clip(a.user?.name ?? a.user?.id ?? '（未知用户）', Math.max(6, inner - 36), g.more)}</T>
+                <T c="sub">{'  ' + clip(a.user?.name ?? a.user?.id ?? '（未知用户）', Math.max(6, inner - 46), g.more)}</T>
+                {a.account === browsing ? <T c="yellow">{'  本次浏览'}</T> : null}
                 {'  '}
                 {status}
               </>
@@ -94,7 +112,7 @@ export function accountKeys(cols: number, canLogin: boolean): React.ReactNode {
   return (
     <Keys
       cols={cols}
-      items={[['↑↓', '选择'], ['Enter', '设为当前'], ['t', '检查'], ...(canLogin ? ([['n', '登录新账号']] as [string, string][]) : []), ['x', '登出'], ['Esc', '返回']]}
+      items={[['↑↓', '选择'], ['Enter', '设为当前'], ['b', '本次浏览用'], ['t', '检查'], ...(canLogin ? ([['n', '登录新账号']] as [string, string][]) : []), ['x', '登出'], ['Esc', '返回']]}
     />
   )
 }

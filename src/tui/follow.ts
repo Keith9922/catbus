@@ -22,7 +22,7 @@ export interface Next {
 }
 
 /** xhs 的 URL 带 xsec_token，必须优先传 URL（4.8）；其余平台 ID 更短更稳。 */
-function ref(o: Obj, platform: Platform): string | null {
+export function refOf(o: Obj, platform: Platform): string | null {
   if (platform.id === 'xhs' && typeof o.url === 'string' && o.url) return o.url
   if (o.id != null && o.id !== '') return String(o.id)
   return typeof o.url === 'string' && o.url ? o.url : null
@@ -37,7 +37,7 @@ function userRef(u: unknown): string | null {
 
 /** 参数名 → 这一项能提供什么值。拿不到的返回 null，该命令就不列出。 */
 function provide(kind: Kind, o: Obj, platform: Platform): Record<string, string | null> {
-  const self = ref(o, platform)
+  const self = refOf(o, platform)
   switch (kind) {
     case 'item':
       return { item: self, user: userRef(o.author), product: o.kind === 'goods' ? self : null, room: null }
@@ -100,6 +100,7 @@ const LABELS: Record<string, string> = {
   'series items': '合集里的内容',
   'route get': '经停站',
   'product get': '商品详情',
+  'item download': '下载',
 }
 
 /** 同一类对象，常用的排在前面。 */

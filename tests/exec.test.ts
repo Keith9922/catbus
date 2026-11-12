@@ -8,7 +8,7 @@ import { finishLogin, freshCredential } from '../src/core/login.js'
 import { definePlatform, type Command, type HandlerContext, type Platform } from '../src/core/registry.js'
 import { invoke, prepare, splitCursor } from '../src/cli/exec.js'
 import { findPlatform, PLATFORMS } from '../src/platforms/index.js'
-import { READ_ACTIONS, runnable } from '../src/tui/model.js'
+import { DOWNLOAD_ACTIONS, READ_ACTIONS, runnable } from '../src/tui/model.js'
 import { loginFields } from '../src/tui/login.js'
 import { cli, mockTrain, useTempHome } from './helpers.js'
 
@@ -251,12 +251,12 @@ describe('界面里能运行的命令（AGENTS 4.13）', () => {
     // 界面按动作名判断能不能运行（白名单）。新动作默认不能在界面里运行，这是安全的一侧；
     // 这个用例只是不让它被悄悄漏掉：只读的加进 READ_ACTIONS（并改 AGENTS 4.13），其余加进下面这份。
     const WRITE = new Set([
-      'add', 'coin', 'collect', 'create', 'delete', 'download', 'edit', 'follow', 'like', 'login', 'logout', 'pin', 'publish', 'read', 'repost',
+      'add', 'coin', 'collect', 'create', 'delete', 'edit', 'follow', 'like', 'login', 'logout', 'pin', 'publish', 'read', 'repost',
       'revoke', 'send', 'start', 'stop', 'triple', 'uncollect', 'unfollow', 'unlike', 'unpin', 'unrepost', 'update', 'upload', 'use', 'listen',
     ])
-    const unknown = [...new Set(all.map(({ c }) => c.action))].filter((a) => !READ_ACTIONS.has(a) && !WRITE.has(a))
+    const unknown = [...new Set(all.map(({ c }) => c.action))].filter((a) => !READ_ACTIONS.has(a) && !DOWNLOAD_ACTIONS.has(a) && !WRITE.has(a))
     expect(unknown, '这些动作还没有登记是读取还是写入').toEqual([])
-    for (const a of WRITE) expect(READ_ACTIONS.has(a), a).toBe(false)
+    for (const a of WRITE) expect(READ_ACTIONS.has(a) || DOWNLOAD_ACTIONS.has(a), a).toBe(false)
   })
 })
 

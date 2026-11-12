@@ -8,26 +8,37 @@ import { copyText, openFile, openUrl } from './clipboard.js'
 import { edit, initial, type TextState } from './input.js'
 import { type LogBuffer, bufferLogger } from './logs.js'
 import { Mascot, MASCOT_ROWS } from './MascotView.js'
-import { availability, usable, cliFromInvocation, cliLine, fields, type FormValue, groupCommands, type PlatformRow, platformRows, toInvocation } from './model.js'
+import { availability, usable, cliFromInvocation, cliLine, DOWNLOAD_ACTIONS, fields, type FormValue, groupCommands, type PlatformRow, platformRows, primaryCommand, quote, runnableCommand, toInvocation } from './model.js'
 import { AccountsView, accountKeys, type AccountsState } from './AccountsView.js'
 import { type LoginSession, type LoginView as LoginState, accountsOf, checkAccount, loginCommand, loginFields, loginMethods, logoutAccount, startLogin, useAccount } from './login.js'
 import { ListenScreen } from './ListenScreen.js'
-import { type Next, nextSteps } from './follow.js'
+import { type Next, nextSteps, refOf } from './follow.js'
 import { NextKeys, NextView } from './NextView.js'
 import { ProgressKeys, ProgressView, ResultView, SetupKeys, SetupView, type SetupState, setupRows } from './LoginView.js'
 import { Splash } from './Splash.js'
 import { PaletteView } from './Palette.js'
-import { ResultKeys, ResultsView, listVisible } from './Results.js'
-import { runCommand } from './run.js'
+import { ResultKeys, ResultsView, resultsVisible } from './Results.js'
+import { type RunRequest, runCommand } from './run.js'
 import {
-  clamp, commandVisible, filterPalette, layoutFor, type PaletteEntry, paletteText, type Phase, type Results, rowsOf, scrollTo, toItems,
+  clamp, commandVisible, filterPalette, originOf, layoutFor, type PaletteEntry, paletteText, type Phase, type Results, rowsOf, scrollTo, toItems,
 } from './state.js'
-import { linkOf, rawOf } from './summary.js'
+import { kindOf, linkOf, rawOf } from './summary.js'
 import { clip, padEnd } from './text.js'
 import { Keys, LookContext, Pane, T, useGlyphs, useLook } from './ui.js'
 import { LATTE, type Look, MOCHA } from './theme.js'
+import type { AggregateResult } from './aggregate.js'
+import { AggregateScreen } from './AggregateScreen.js'
+import { canComment } from './comments.js'
+import { CommentsScreen } from './CommentsScreen.js'
+import { DownloadQueue } from './downloads.js'
+import { DownloadsScreen } from './DownloadsScreen.js'
+import { MediaScreen } from './MediaScreen.js'
+import { SettingsScreen } from './SettingsScreen.js'
 
 // 主界面（AGENTS 4.13）：状态和按键在这里，画面交给各个子组件。
+
+/** 本次浏览账号的初值：没有任何平台换过账号。 */
+const EMPTY_MAP: Readonly<Record<string, string>> = Object.freeze({})
 
 /** platforms 默认是注册表里的全部平台；测试时可以换成假平台。 */
 export function App({ look, logs, platforms = PLATFORMS }: { look: Look; logs: LogBuffer; platforms?: Platform[] }) {
@@ -36,7 +47,7 @@ export function App({ look, logs, platforms = PLATFORMS }: { look: Look; logs: L
   const value = useMemo<Look>(() => ({ ...look, palette: light ? LATTE : MOCHA }), [look, light])
   return (
     <LookContext.Provider value={value}>
-      <Shell logs={logs} platforms={platforms} toggleTheme={() => setLight((v) => !v)} />
+      <Shell logs={logs} platforms={platforms} light={light} toggleTheme={() => setLight((v) => !v)} />
     </LookContext.Provider>
   )
 }
@@ -48,9 +59,12 @@ function mainGroup(p: Platform): string[] {
   return pick ? [pick.resource] : []
 }
 
-type Mode = 'browse' | 'palette' | 'help' | 'json' | 'detail' | 'next' | 'accounts' | 'login' | 'listen'
+type Mode = 'browse' | 'palette' | 'help' | 'json' | 'detail' | 'next' | 'accounts' | 'login' | 'listen' | 'downloads' | 'comments' | 'media' | 'settings' | 'aggregate'
 
-function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: Platform[]; toggleTheme: () => void }) {
+/** 自己处理按键、自己画整屏的页面：主界面的 useInput 让路，免得同一次按键处理两遍。 */
+const SCREENS: ReadonlySet<Mode> = new Set(['listen', 'downloads', 'comments', 'media', 'settings', 'aggregate'])
+
+function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platforms: Platform[]; light: boolean; toggleTheme: () => void }) {
   const { exit } = useApp()
   const { columns, rows: screenRows } = useWindowSize()
   const g = useGlyphs()
@@ -73,6 +87,7 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
   const [phase, setPhase] = useState<Phase>({ type: 'browse' })
   const [mode, setMode] = useState<Mode>('browse')
   const [note, setNote] = useState<string | null>(null)
+  const [helpTop, setHelpTop] = useState(0)
   const [log, setLog] = useState<string | null>(null)
   const [spin, setSpin] = useState(0)
   const abort = useRef<AbortController | null>(null)
@@ -104,8 +119,28 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
   const [stepAt, setStepAt] = useState(0)
   // 监听
   const [listening, setListening] = useState<{ platform: Platform; command: Command; words: string[]; given: Record<string, unknown> } | null>(null)
+  // 本次浏览用的账号（平台 id → 账号名）：相当于 -a，不改 _current（AGENTS 4.13）
+  const [browseAs, setBrowseAs] = useState<Readonly<Record<string, string>>>(EMPTY_MAP)
+  const browseRef = useRef(browseAs)
+  browseRef.current = browseAs
+  const accountFor = useCallback((p: Platform): string | undefined => browseRef.current[p.id], [])
+  // 下载目录：默认是启动时的目录（与 CLI 的 --dir 默认值一致）；设置页里可以改，只在这次运行里有效
+  const [downloadDir, setDownloadDir] = useState(() => process.cwd())
+  const dirRef = useRef(downloadDir)
+  dirRef.current = downloadDir
+  const queue = useMemo(() => new DownloadQueue({ log: bufferLogger(logs), dir: () => dirRef.current, account: (p) => browseRef.current[p.id] }), [logs])
+  const [downloads, setDownloads] = useState(() => queue.counts())
+  useEffect(() => queue.subscribe(() => setDownloads(queue.counts())), [queue])
+  // 评论页、媒体页看的是哪一条
+  const [target, setTarget] = useState<{ platform: Platform; item: Record<string, unknown> } | null>(null)
+  // 每个平台最近一次的结果（聚合搜索不算），浏览页按 r 回去
+  const lastResults = useRef(new Map<string, Extract<Phase, { type: 'results' }>>())
   // 从“接着做”回到上一页结果
   const [back, setBack] = useState<Extract<Phase, { type: 'results' }>[]>([])
+
+  useEffect(() => {
+    if (phase.type === 'results' && !phase.results.origins) lastResults.current.set(phase.results.platform.id, phase)
+  }, [phase])
 
   const platform: Platform = platformList[pi]!.platform
   const groups = useMemo(() => groupCommands(platform), [platform])
@@ -208,7 +243,12 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
       if (previous) setPhase((ph) => (ph.type === 'results' ? { ...ph, loadingMore: true } : ph))
       else setPhase({ type: 'running', label: `${p.id} ${c.resource} ${c.action}` })
       try {
-        const result = await runCommand({ platform: p, command: c, words, given, cursor, log: bufferLogger(logs), signal: controller.signal })
+        // 下载命令没给 --dir 时用设置页里的下载目录
+        const withDir = DOWNLOAD_ACTIONS.has(c.action) && given.dir == null ? { ...given, dir: dirRef.current } : given
+        const req: RunRequest = { platform: p, command: c, words, given: withDir, cursor, log: bufferLogger(logs), signal: controller.signal }
+        const as = browseRef.current[p.id]
+        if (as) req.account = as
+        const result = await runCommand(req)
         if (controller.signal.aborted) return
         const { items, single } = toItems(result.data)
         const merged: Results = previous
@@ -219,6 +259,8 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
           results: merged,
           selected: previous && ph.type === 'results' ? ph.selected : 0,
           top: previous && ph.type === 'results' ? ph.top : 0,
+          // 翻页只往后接，已选的下标不变；滚到底自动翻页时不能把选择清掉
+          marked: previous && ph.type === 'results' ? ph.marked : undefined,
           loadingMore: false,
         }))
         setMode('browse')
@@ -344,7 +386,8 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
   const openNext = () => {
     if (phase.type !== 'results') return
     const item = phase.results.items[phase.selected]
-    const list = nextSteps(phase.results.platform, phase.results.command, item)
+    const origin = originOf(phase.results, phase.selected)
+    const list = nextSteps(origin.platform, origin.command, item)
     setSteps(list)
     setStepAt(0)
     setMode('next')
@@ -361,6 +404,119 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     if (phase.type !== 'results' || phase.loadingMore || !phase.results.page?.has_more) return
     const r = phase.results
     void run(r.platform, r.command, r.words, r.given, r.page!.cursor, r)
+  }
+
+  // ---- 下载、评论、媒体（结果页）----
+
+  /** 结果页选中的这一条，以及它来自哪个平台（聚合搜索里每条不一样）。 */
+  const currentItem = (): { item: unknown; platform: Platform } | null => {
+    if (phase.type !== 'results') return null
+    return { item: phase.results.items[phase.selected], platform: originOf(phase.results, phase.selected).platform }
+  }
+
+  /** 下载：有选中的就下载选中的，否则下载当前这一条。按平台分组，各用各的 item download。 */
+  const startDownload = () => {
+    if (phase.type !== 'results') return
+    const r = phase.results
+    const picked = phase.marked?.size ? [...phase.marked].sort((a, b) => a - b) : [phase.selected]
+    const groups = new Map<string, { platform: Platform; items: unknown[] }>()
+    for (const i of picked) {
+      const p = originOf(r, i).platform
+      const grp = groups.get(p.id) ?? { platform: p, items: [] }
+      grp.items.push(r.items[i])
+      groups.set(p.id, grp)
+    }
+    let added = 0
+    const cannot: string[] = []
+    for (const grp of groups.values()) {
+      const dl = runnableCommand(grp.platform, 'item download')
+      if (dl) added += queue.add(grp.platform, dl, grp.items)
+      else cannot.push(grp.platform.name)
+    }
+    const tail = cannot.length ? `；${cannot.join('、')}不能在界面里下载` : ''
+    if (added) setPhase({ ...phase, marked: new Set() })
+    setNote(added ? `已加入下载 ${added} 条，保存到 ${dirRef.current}，按 D 看进度${tail}` : tail ? tail.slice(1) : '这一项没法下载')
+  }
+
+  /** 打开评论页或媒体页：只对一条内容（Item）有意义。 */
+  const openItemScreen = (next: 'comments' | 'media') => {
+    const cur = currentItem()
+    if (!cur || kindOf(cur.item) !== 'item') return setNote('选中的不是一条内容')
+    const item = cur.item as Record<string, unknown>
+    if (!refOf(item, cur.platform)) return setNote('这一条没有 ID，也没有链接')
+    if (next === 'comments' && !canComment(cur.platform)) return setNote(`${cur.platform.name}不能在界面里看评论`)
+    setTarget({ platform: cur.platform, item })
+    setMode(next)
+  }
+
+  const toggleMark = () => {
+    if (phase.type !== 'results') return
+    const marked = new Set(phase.marked ?? [])
+    if (marked.has(phase.selected)) marked.delete(phase.selected)
+    else marked.add(phase.selected)
+    const sel = clamp(phase.selected + 1, 0, total - 1)
+    setPhase({ ...phase, marked, selected: sel, top: scrollTo(sel, phase.top, resultsVisible(phase.results, bodyRows), total) })
+  }
+
+  const markAll = () => {
+    if (phase.type !== 'results') return
+    setPhase({ ...phase, marked: phase.marked?.size === total ? new Set() : new Set(phase.results.items.map((_, i) => i)) })
+  }
+
+  // ---- 搜索入口、回到结果、聚合搜索（浏览页）----
+
+  /** 按 s：打开本平台的搜索（没有搜索就是推荐流），焦点在关键词上。 */
+  const openSearch = () => {
+    const c = primaryCommand(platform)
+    if (!c) return setNote(`${platform.name}没有能在界面里运行的搜索或推荐流`)
+    openCommand(platform, c)
+  }
+
+  /** 按 r：回到这个平台上一次的结果（选中位置也还在）。 */
+  const restoreResults = () => {
+    const last = lastResults.current.get(platform.id)
+    if (!last) return setNote(`${platform.name}这次还没有运行过命令`)
+    setBack([])
+    setPhase(last)
+    setMode('browse')
+  }
+
+  /** 聚合搜索的结果：合成一份结果，每条记着来自哪个平台。 */
+  const showAggregate = (keyword: string, result: AggregateResult) => {
+    const fails = result.failures.map((f) => `${f.platform.name} ${f.error.code}`).join('、')
+    const first = result.origins[0]
+    if (!first) {
+      setMode('browse')
+      setNote(fails ? `没有结果；失败：${fails}` : '没有结果')
+      return
+    }
+    const counts = Object.entries(result.counts).map(([id, n]) => `${platforms.find((p) => p.id === id)?.name ?? id} ${n}`).join('、')
+    const notes = [counts, ...(fails ? [`失败：${fails}`] : [])]
+    const shell = process.platform === 'win32' ? 'win' : 'posix'
+    const results: Results = {
+      platform: first.platform,
+      command: first.command,
+      line: `catbus ${first.platform.id} item search ${quote(keyword, shell)}`,
+      words: [keyword],
+      given: {},
+      items: result.items,
+      single: false,
+      page: null,
+      account: null,
+      origins: result.origins,
+      notes,
+    }
+    setBack([])
+    setPhase({ type: 'results', results, selected: 0, top: 0, loadingMore: false })
+    setMode('browse')
+  }
+
+  /** 结果页底部的等价命令：聚合搜索按选中这一条来自的平台写。 */
+  const resultLine = (ph: Extract<Phase, { type: 'results' }>): string => {
+    const r = ph.results
+    if (!r.origins) return r.line
+    const o = originOf(r, ph.selected)
+    return cliFromInvocation(o.platform, o.command, r.words, r.given)
   }
 
   const copy = async (text: string, what: string) => {
@@ -475,7 +631,16 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
       setAcc((a) => ({ ...a, confirmLogout: null }))
       if (input === 'y') {
         void logoutAccount(platform, target, bufferLogger(logs))
-          .then(() => reloadAccounts(`已登出 ${target}`))
+          .then(() => {
+            // 登出的正是本次浏览用的账号：改回当前账号
+            setBrowseAs((m) => {
+              if (m[platform.id] !== target) return m
+              const n = { ...m }
+              delete n[platform.id]
+              return n
+            })
+            return reloadAccounts(`已登出 ${target}`)
+          })
           .catch((e) => setNote(`登出失败：${(e as Error).message}`))
       }
       return
@@ -490,6 +655,17 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
       void useAccount(platform, row.account, bufferLogger(logs))
         .then(() => reloadAccounts(`当前账号：${row.account}`))
         .catch((e) => setNote((e as Error).message))
+      return
+    }
+    if (input === 'b') {
+      const same = browseAs[platform.id] === row.account
+      setBrowseAs((m) => {
+        const n = { ...m }
+        if (same) delete n[platform.id]
+        else n[platform.id] = row.account
+        return n
+      })
+      setNote(same ? '本次浏览改回当前账号' : `本次浏览用 ${row.account}（不改当前账号）`)
       return
     }
     if (input === 'x') return setAcc((a) => ({ ...a, confirmLogout: row.account }))
@@ -535,7 +711,7 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     if (phase.type !== 'results') return
     const move = (n: number) => {
       const sel = clamp(n, 0, total - 1)
-      setPhase({ ...phase, selected: sel, top: scrollTo(sel, phase.top, listVisible(bodyRows), total) })
+      setPhase({ ...phase, selected: sel, top: scrollTo(sel, phase.top, resultsVisible(phase.results, bodyRows), total) })
       if (sel >= total - 3) nextPage()
     }
     if (mode === 'detail') {
@@ -555,8 +731,8 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     }
     if (input === 'j' || key.downArrow) move(phase.selected + 1)
     else if (input === 'k' || key.upArrow) move(phase.selected - 1)
-    else if (key.pageDown) move(phase.selected + listVisible(bodyRows))
-    else if (key.pageUp) move(phase.selected - listVisible(bodyRows))
+    else if (key.pageDown) move(phase.selected + resultsVisible(phase.results, bodyRows))
+    else if (key.pageUp) move(phase.selected - resultsVisible(phase.results, bodyRows))
     else if (input === 'g' || key.home) move(0)
     else if (input === 'G' || key.end) move(total - 1)
     else if (key.return) openNext()
@@ -570,12 +746,18 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
       const link = linkOf(phase.results.items[phase.selected])
       if (link && /^https?:/i.test(link)) void openUrl(link).then((ok) => setNote(ok ? '已在浏览器打开' : '没能打开浏览器'))
       else setNote('这一项没有可打开的链接')
-    } else if (input === 'c') void copy(phase.results.line, '命令')
+    } else if (input === 'c') void copy(resultLine(phase), '命令')
     else if (input === '/') {
       setQuery(initial(''))
       setPi2(0)
       setMode('palette')
     } else if (input === 'a') openAccounts()
+    else if (input === ' ') toggleMark()
+    else if (input === 'v') markAll()
+    else if (input === 'd') startDownload()
+    else if (input === 'D') setMode('downloads')
+    else if (input === 'm') openItemScreen('comments')
+    else if (input === 'i') openItemScreen('media')
     return
   }
 
@@ -637,6 +819,11 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
   if (input === '?') return setMode('help')
   if (input === 'a') return openAccounts()
   if (input === 'T') return toggleTheme()
+  if (input === 's') return openSearch()
+  if (input === 'r') return restoreResults()
+  if (input === 'A') return setMode('aggregate')
+  if (input === 'S') return setMode('settings')
+  if (input === 'D') return setMode('downloads')
   if (input === 'c') return void copy(line, '命令')
   if (key.tab) {
     setPane(pane === 'platforms' ? 'commands' : 'platforms')
@@ -694,6 +881,10 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     }
 
     if (mode === 'help') {
+      // 帮助放不下一屏时可以滚动；其他键返回
+      if (key.downArrow || input === 'j') return setHelpTop((n) => Math.min(Math.max(0, HELP_LINES - helpVisible(bodyRows)), n + 1))
+      if (key.upArrow || input === 'k') return setHelpTop((n) => Math.max(0, n - 1))
+      setHelpTop(0)
       setMode('browse')
       return
     }
@@ -730,8 +921,8 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     if (phase.type === 'results') return onResultsKey(input, key)
     onBrowseKey(input, key)
     },
-    // 监听屏有自己的 useInput；这里让路，免得同一次按键处理两遍
-    { isActive: mode !== 'listen' },
+    // 监听、下载、评论、媒体、设置、聚合搜索这几页有自己的 useInput；这里让路，免得同一次按键处理两遍
+    { isActive: !SCREENS.has(mode) },
   )
 
   // 粘贴：只在表单的文本字段里生效
@@ -794,11 +985,16 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
         {look.ascii ? ' ( >w_ )' : ' ( >ω_ )'}
       </T>
       <T bold>{'  catbus'}</T>
-      <T c="dim">{'  ' + (phase.type === 'results' ? `${platform.name} ${g.sep} ${phase.results.command.resource} ${g.sep} ` : '')}</T>
+      <T c="dim">{'  ' + (phase.type === 'results' ? (phase.results.origins ? `聚合搜索 ${g.sep} ` : `${phase.results.platform.name} ${g.sep} ${phase.results.command.resource} ${g.sep} `) : '')}</T>
       {phase.type === 'results' ? <T c="accent">{phase.results.command.action}</T> : <T c="dim">上车，开往任何平台</T>}
       <Box flexGrow={1} />
       <T c="sub">{'账号 '}</T>
-      <T c={accountInfo.loggedIn ? 'green' : 'dim'}>{accountInfo.account ?? (accountInfo.open ? '免登录' : '游客')}</T>
+      {downloads.waiting + downloads.running ? <T c="accent">{`下载 ${downloads.done}/${downloads.done + downloads.failed + downloads.waiting + downloads.running + downloads.paused}  `}</T> : null}
+      {browseAs[platform.id] ? (
+        <T c="yellow">{`${browseAs[platform.id]}（本次）`}</T>
+      ) : (
+        <T c={accountInfo.loggedIn ? 'green' : 'dim'}>{accountInfo.account ?? (accountInfo.open ? '免登录' : '游客')}</T>
+      )}
       <T c="dim">{'  端 web  '}</T>
     </Box>
   )
@@ -813,6 +1009,7 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
           command={listening.command}
           words={listening.words}
           given={listening.given}
+          account={browseRef.current[listening.platform.id]}
           logs={logs}
           cols={columns}
           rows={screenRows - 1}
@@ -826,6 +1023,31 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
             setPhase({ type: 'error', code: e.code, message: e.message, hint: e.hint, exit: e.exitCode })
           }}
         />
+      </Box>
+    )
+  }
+
+  // 下载、评论、媒体、设置、聚合搜索：各自画整屏、处理按键，Esc 回到原来的页面
+  const belowHeader = screenRows - 1
+  const leaveScreen = () => setMode('browse')
+  let screen: React.ReactNode = null
+  if (mode === 'downloads') screen = <DownloadsScreen queue={queue} dir={downloadDir} cols={columns} rows={belowHeader} onExit={leaveScreen} />
+  else if (mode === 'settings') screen = <SettingsScreen cols={columns} rows={belowHeader} downloadDir={downloadDir} onDownloadDir={setDownloadDir} light={light} onToggleTheme={toggleTheme} onExit={leaveScreen} />
+  else if (mode === 'aggregate') screen = <AggregateScreen rowsOfPlatforms={platformList} logs={logs} accountOf={accountFor} cols={columns} rows={belowHeader} onResults={showAggregate} onExit={leaveScreen} />
+  else if (target && (mode === 'comments' || mode === 'media')) {
+    const title = String(target.item.title ?? target.item.text ?? target.item.id ?? '').replace(/\s+/g, ' ')
+    const as = browseAs[target.platform.id]
+    if (mode === 'media') screen = <MediaScreen platform={target.platform} item={target.item} title={title} account={as} logs={logs} cols={columns} rows={belowHeader} onExit={leaveScreen} />
+    else {
+      const url = typeof target.item.url === 'string' ? target.item.url : null
+      screen = <CommentsScreen platform={target.platform} itemRef={refOf(target.item, target.platform) ?? ''} itemUrl={url} title={title} account={as} logs={logs} cols={columns} rows={belowHeader} onExit={leaveScreen} />
+    }
+  }
+  if (screen) {
+    return (
+      <Box flexDirection="column" width={columns} height={screenRows}>
+        {header}
+        {screen}
       </Box>
     )
   }
@@ -847,14 +1069,14 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
       keys = <ProgressKeys cols={columns - 2} view={loginView} />
     }
   } else if (mode === 'accounts') {
-    body = <AccountsView platform={platform} state={acc} cols={columns} rows={bodyRows} canLogin={canLogin} note={note} />
+    body = <AccountsView platform={platform} state={acc} cols={columns} rows={bodyRows} canLogin={canLogin} note={note} browsing={browseAs[platform.id] ?? null} />
     keys = accountKeys(columns - 2, canLogin)
   } else if (mode === 'next' && phase.type === 'results') {
     const item = phase.results.items[phase.selected] as Record<string, unknown> | undefined
     body = <NextView steps={steps} selected={stepAt} title={String(item?.title ?? item?.name ?? item?.id ?? '')} cols={columns} rows={bodyRows} />
     keys = <NextKeys cols={columns - 2} />
   } else if (mode === 'help') {
-    body = <HelpView cols={columns} rows={bodyRows} />
+    body = <HelpView cols={columns} rows={bodyRows} top={helpTop} />
     keys = <Keys cols={columns - 2} items={[['任意键', '返回']]} />
   } else if (mode === 'palette') {
     body = <PaletteView query={query} entries={hits} selected={pi2} cols={columns} rows={bodyRows} loggedIn={new Set(platformList.filter((r) => r.loggedIn).map((r) => r.platform.id))} />
@@ -882,8 +1104,9 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     keys = <Keys cols={columns - 2} items={[['Esc', '返回']]} />
   } else if (phase.type === 'results') {
     const r = phase.results
-    body = <ResultsView data={r} selected={phase.selected} top={phase.top} cols={columns} rows={bodyRows} detail={mode === 'detail'} loadingMore={phase.loadingMore} />
-    keys = <ResultKeys cols={columns - 2} canMore={!!r.page?.has_more} split={columns >= 100} />
+    body = <ResultsView data={r} selected={phase.selected} top={phase.top} cols={columns} rows={bodyRows} detail={mode === 'detail'} loadingMore={phase.loadingMore} marked={phase.marked} />
+    const here = originOf(r, phase.selected).platform
+    keys = <ResultKeys cols={columns - 2} canMore={!!r.page?.has_more} split={columns >= 100} canDownload={runnableCommand(here, 'item download') != null} canComments={canComment(here)} />
   } else {
     const h = bodyRows
     const platformCols = wide ? 24 : 22
@@ -909,7 +1132,7 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
     keys = <BrowseKeys cols={columns - 2} pane={pane} canRun={!!command && usable(command)} />
   }
 
-  const lineText = phase.type === 'results' ? phase.results.line : line
+  const lineText = phase.type === 'results' ? resultLine(phase) : line
   const status = note ?? log
   return (
     <Box flexDirection="column" width={columns} height={screenRows}>
@@ -928,52 +1151,66 @@ function Shell({ logs, platforms, toggleTheme }: { logs: LogBuffer; platforms: P
   )
 }
 
-function HelpView({ cols, rows }: { cols: number; rows: number }) {
-  const lines: [string, string][] = [
-    ['↑ ↓  j k', '上下移动'],
-    ['← →  h l', '收起 / 展开，进入 / 返回'],
-    ['Tab', '换栏；在表单里换字段'],
-    ['Enter', '展开命令、运行命令'],
-    ['/', '命令面板：搜遍全部平台的命令'],
-    ['c', '复制当前的等价命令'],
-    ['a', '账号页：切换、检查、登出、登录新账号'],
-    ['T', '切换浅色 / 深色'],
-    ['y  o', '复制链接 / 在浏览器里打开（结果页）'],
-    ['n', '下一页（滚到底部也会自动取）'],
-    ['Enter', '结果页：接着做什么（评论、作者、监听……，参数已填好）'],
-    ['J', '看原始 JSON（--raw 的内容）'],
-    ['Esc', '返回上一级'],
-    ['q  Ctrl-C', '退出'],
-  ]
-  const legend: [string, string][] = [
-    ['● 命令', '在界面里运行'],
-    ['~ 命令', '持续监听（弹幕、私信）'],
-    ['○ 命令', '读取之外的命令，复制到终端运行'],
-    ['- 命令', '规划中，还没实现'],
-    ['● 平台', '已登录；青色是免登录可用'],
-  ]
+/** 帮助页的内容：按键说明、标记图例、两句提示。空行是分组之间的间隔。 */
+const HELP: ([string, string] | null)[] = [
+  ['↑ ↓  j k', '上下移动'],
+  ['← →  h l', '收起 / 展开，进入 / 返回'],
+  ['Tab', '换栏；在表单里换字段'],
+  ['Enter', '展开命令、运行命令'],
+  ['/', '命令面板：搜遍全部平台的命令'],
+  ['s', '搜索当前平台（没有搜索的平台是推荐流）'],
+  ['A', '聚合搜索：一个关键词同时搜几个平台'],
+  ['r', '回到这个平台上一次的结果'],
+  ['c', '复制当前的等价命令'],
+  ['a', '账号页：切换、检查、登出、登录新账号'],
+  ['b', '账号页：只在这次浏览里用这个账号，不改当前账号'],
+  ['D  S', '下载进度 / 设置（代理、超时、下载目录）'],
+  ['T', '切换浅色 / 深色'],
+  null,
+  ['Enter', '结果页：接着做什么（评论、作者、监听……，参数已填好）'],
+  ['空格  v  d', '结果页：选择 / 全选 / 下载选中的（没选就下载当前这条）'],
+  ['m  i', '结果页：看评论和楼中楼 / 图片视频地址'],
+  ['y  o', '结果页：复制链接 / 在浏览器里打开'],
+  ['n', '结果页：下一页（滚到底部也会自动取）'],
+  ['J', '结果页：看原始 JSON（--raw 的内容）'],
+  ['Esc', '返回上一级'],
+  ['q  Ctrl-C', '退出'],
+  null,
+  ['● 命令', '在界面里运行'],
+  ['~ 命令', '持续监听（弹幕、私信）'],
+  ['○ 命令', '读取之外的命令，复制到终端运行'],
+  ['- 命令', '规划中，还没实现'],
+  ['● 平台', '已登录；青色是免登录可用'],
+  null,
+  ['', '界面里运行读取类命令、下载、监听和登录；写入、删除、发布请复制命令到终端执行。'],
+  ['', '终端把 ● ○ │ 显示成两列宽时，设置环境变量 CATBUS_TUI_ASCII=1。'],
+]
+
+/** 帮助页能显示几行：放不下时可以用 ↑↓ 滚动（窗口最小是 80 × 24，放不下全部）。 */
+export const helpVisible = (rows: number): number => Math.max(1, rows - 3)
+export const HELP_LINES = HELP.length
+
+function HelpView({ cols, rows, top }: { cols: number; rows: number; top: number }) {
+  const g = useGlyphs()
+  const visible = helpVisible(rows)
+  const start = Math.max(0, Math.min(top, HELP.length - visible))
   return (
     <Pane title="按键" cols={cols} rows={rows} focused>
-      {lines.map(([k, v]) => (
-        <Box key={k} paddingLeft={2}>
-          <T c="accent">{padEnd(k, 14)}</T>
-          <T>{v}</T>
+      {HELP.slice(start, start + visible).map((line, i) =>
+        line == null ? (
+          <Box key={start + i} height={1} />
+        ) : (
+          <Box key={start + i} paddingLeft={2}>
+            <T c={line[0] ? 'accent' : 'dim'}>{line[0] ? padEnd(line[0], 14) : ''}</T>
+            <T c={line[0] ? undefined : 'dim'}>{clip(line[1], cols - 20, g.more)}</T>
+          </Box>
+        ),
+      )}
+      {HELP.length > visible ? (
+        <Box paddingLeft={2}>
+          <T c="dim">{`${start + 1}-${Math.min(HELP.length, start + visible)} / ${HELP.length}  ↑↓ 滚动，其他键返回`}</T>
         </Box>
-      ))}
-      <Box height={1} />
-      {legend.map(([k, v]) => (
-        <Box key={k} paddingLeft={2}>
-          <T c="accent">{padEnd(k, 14)}</T>
-          <T>{v}</T>
-        </Box>
-      ))}
-      <Box height={1} />
-      <Box paddingLeft={2}>
-        <T c="dim">界面里运行读取类命令、监听和登录；写入、删除、发布请复制命令到终端执行。</T>
-      </Box>
-      <Box paddingLeft={2}>
-        <T c="dim">终端把 ● ○ │ 显示成两列宽时，设置环境变量 CATBUS_TUI_ASCII=1。</T>
-      </Box>
+      ) : null}
     </Pane>
   )
 }

@@ -2,7 +2,7 @@ import { CatbusError, toCatbusError } from '../core/errors.js'
 import { parseDuration } from '../core/options.js'
 import type { Command, Platform } from '../core/registry.js'
 import { listenable } from './model.js'
-import { prepare } from '../cli/exec.js'
+import { type Invocation, prepare } from '../cli/exec.js'
 import type { Logger } from '../core/log.js'
 import { clock, count } from './text.js'
 
@@ -88,6 +88,8 @@ export interface ListenRequest {
   words: string[]
   given: Record<string, unknown>
   log: Logger
+  /** 相当于 `-a <账号>`：本次浏览用的账号；不给时用当前账号。 */
+  account?: string
 }
 
 export interface ListenHandle {
@@ -106,7 +108,9 @@ export async function startListen(req: ListenRequest, onEvent: (value: unknown) 
   const { platform, command, log } = req
   if (!listenable(command)) throw new CatbusError('USAGE', `${command.key} 不是监听命令`)
   const controller = new AbortController()
-  const { ctx, handler, finish } = await prepare({ platform, command, words: req.words, given: req.given, log, signal: controller.signal })
+  const inv: Invocation = { platform, command, words: req.words, given: req.given, log, signal: controller.signal }
+  if (req.account) inv.account = req.account
+  const { ctx, handler, finish } = await prepare(inv)
   const duration = typeof ctx.options.duration === 'string' ? parseDuration(ctx.options.duration) : null
   const timer = duration ? setTimeout(() => controller.abort(), duration) : null
   const endsAt = duration ? Date.now() + duration : null

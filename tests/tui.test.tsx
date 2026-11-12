@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as rand from '../src/core/rand.js'
 import { resetSession } from '../src/platforms/12306/web/client.js'
 import { PLATFORMS } from '../src/platforms/index.js'
+import { availability, groupCommands } from '../src/tui/model.js'
 import { mockTrain, useTempHome } from './helpers.js'
 import { KEYS, type Session, start } from './tui-harness.js'
 
@@ -93,13 +94,22 @@ describe('catbus tui', () => {
   it('不在界面里运行的命令：写入类显示提示，Enter 不执行', async () => {
     const s = await open()
     await s.press(KEYS.right)
-    // 行序：user、item、get、search、related、list、media、download……；下 7 次落在 download，它不是读取类命令
-    for (let i = 0; i < 7; i++) await s.press(KEYS.down)
+    // 命令栏的行：user（收起）、item（展开）、item 下的命令……。按顺序找第一条只能在终端运行的（发布等写入类）
+    const item = groupCommands(PLATFORMS[0]!).find((g) => g.resource === 'item')!
+    const at = item.commands.findIndex((c) => availability(c) === 'cli-only')
+    expect(at).toBeGreaterThanOrEqual(0)
+    for (let i = 0; i < at + 2; i++) await s.press(KEYS.down)
     await s.press(KEYS.right)
     expect(text(s)).toContain('复制到终端执行')
     await s.press(KEYS.enter)
     await s.settle(100)
     expect(text(s)).not.toContain('正在运行')
+  })
+
+  it('下载能在界面里运行（只写本机文件，不改平台数据）', () => {
+    const item = groupCommands(PLATFORMS[0]!).find((g) => g.resource === 'item')!
+    const download = item.commands.find((c) => c.action === 'download')
+    if (download?.status === 'implemented') expect(availability(download)).toBe('run')
   })
 
   it('命令面板：/ 搜到跨平台的命令，Enter 直达表单', async () => {
