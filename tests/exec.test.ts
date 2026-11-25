@@ -223,7 +223,8 @@ describe('exec 与 dispatch.runPlatform 保持同步', () => {
 
 describe('界面里能运行的命令（AGENTS 4.13）', () => {
   const all = PLATFORMS.flatMap((p) => {
-    const ep = p.endpoints.web
+    // 界面用的是平台的默认端（discord 是 pc），守护测试也看这一端；只看 web 会漏掉 discord 的全部命令
+    const ep = p.endpoints[p.defaultEndpoint]
     return ep === 'planned' ? [] : [...ep.commands.values()].map((c) => ({ p, c }))
   })
 
@@ -252,7 +253,7 @@ describe('界面里能运行的命令（AGENTS 4.13）', () => {
     // 这个用例只是不让它被悄悄漏掉：只读的加进 READ_ACTIONS（并改 AGENTS 4.13），其余加进下面这份。
     const WRITE = new Set([
       'add', 'coin', 'collect', 'create', 'delete', 'edit', 'follow', 'like', 'login', 'logout', 'pin', 'publish', 'read', 'repost',
-      'revoke', 'send', 'sort', 'start', 'stop', 'triple', 'uncollect', 'unfollow', 'unlike', 'unpin', 'unrepost', 'update', 'upload', 'use', 'listen',
+      'revoke', 'send', 'sort', 'start', 'stop', 'accept', 'block', 'unblock', 'clear', 'leave', 'purge', 'register', 'typing', 'triple', 'uncollect', 'unfollow', 'unlike', 'unpin', 'unrepost', 'update', 'upload', 'use', 'listen',
     ])
     const unknown = [...new Set(all.map(({ c }) => c.action))].filter((a) => !READ_ACTIONS.has(a) && !DOWNLOAD_ACTIONS.has(a) && !WRITE.has(a))
     expect(unknown, '这些动作还没有登记是读取还是写入').toEqual([])
@@ -274,11 +275,15 @@ describe('登录页的表单从注册表生成', () => {
     expect(names('mteam', 'password')).toEqual(['*username', 'email'])
     // 平台声明不支持的标准选项不出现
     expect(names('jimeng', 'oauth')).toEqual([])
+    // 平台私有选项各自只在适用的方式下出现；只给非交互调用用的 --captcha 不进表单（界面本来就是交互的）
+    expect(names('discord', 'qrcode')).toEqual([])
+    expect(names('discord', 'password')).toEqual(['*username', 'mfaMethod', 'undelete'])
+    expect(names('discord', 'token')).toEqual(['tokenFile'])
   })
 
   it('从 stdin 读取的选项、分步登录用的 --code / --user 不进表单；cookie 隐藏输入', () => {
     for (const p of PLATFORMS) {
-      const ep = p.endpoints.web
+      const ep = p.endpoints[p.defaultEndpoint]
       if (ep === 'planned') continue
       for (const m of ep.login.methods) {
         const fields = loginFields(p, m)

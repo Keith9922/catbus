@@ -6,7 +6,7 @@ import type { Command, Platform } from '../core/registry.js'
 import type { Account, AuthStatus } from '../core/schemas.js'
 import { type Invocation, invoke } from '../cli/exec.js'
 import type { Logger } from '../core/log.js'
-import { webEndpoint } from './model.js'
+import { activeEndpoint, endpointOf } from './model.js'
 
 // 登录与账号管理的执行部分（AGENTS 4.13）：不含 React。界面通过 LoginSession 拿到“现在该显示什么”。
 // 实际登录仍由各平台的 `auth login` handler 完成（5.3 的流程不变），这里只是把它的二维码、提问接到界面上。
@@ -40,15 +40,15 @@ export interface LoginSession {
   done: Promise<void>
 }
 
-/** 本平台 web 端的 auth login 命令；没有（如 12306）返回 null。 */
+/** 本平台（默认端）的 auth login 命令；没有（如 12306）返回 null。 */
 export function loginCommand(platform: Platform): Command | null {
-  const ep = webEndpoint(platform)
+  const ep = activeEndpoint(platform)
   const c = ep?.commands.get('auth login')
   return c && c.status === 'implemented' ? c : null
 }
 
 export function loginMethods(platform: Platform): { methods: LoginMethod[]; default: LoginMethod | null; scopes: string[] } {
-  const ep = webEndpoint(platform)
+  const ep = activeEndpoint(platform)
   return { methods: ep?.login.methods ?? [], default: ep?.login.default ?? null, scopes: ep?.login.scopes ?? [] }
 }
 
@@ -70,9 +70,10 @@ export interface LoginField {
  * 界面不提供的 `auth login` 选项：
  * - method、scope：登录页有单独的两行；
  * - code、user：分步登录（非 TTY 下先发码再带 --code）用的，界面里一步完成，验证码、选账号都由 handler 提问；
- * - 名字以 Stdin 结尾的：从 stdin 读取，界面里 stdin 归界面，相应内容由 handler 在界面里提问（密码、API Key）。
+ * - 名字以 Stdin 结尾的：从 stdin 读取，界面里 stdin 归界面，相应内容由 handler 在界面里提问（密码、API Key）；
+ * - captcha：「在非交互式调用中启用浏览器人机验证」。界面本来就是交互的，需要验证时链接显示在页面上，不用再开关。
  */
-const OMITTED = new Set(['method', 'scope', 'code', 'user'])
+const OMITTED = new Set(['method', 'scope', 'code', 'user', 'captcha'])
 /** handler 不会提问、缺了就报 USAGE 的选项。其余选项都可以留空（handler 会问，或者本来就可选）。 */
 const REQUIRED: Partial<Record<LoginMethod, string[]>> = { cookie: ['cookie'], password: ['username'] }
 const HIDDEN = new Set(['cookie'])
@@ -179,13 +180,13 @@ export function startLogin(req: LoginRequest, emit: (v: LoginView) => void): Log
 // ---- 账号 ----
 
 export interface AccountRow extends Account {
-  /** 是否是这个平台 web 端当前正在用的账号。 */
+  /** 是否是这个平台（默认端）当前正在用的账号。 */
   active: boolean
 }
 
 export async function accountsOf(platform: Platform): Promise<AccountRow[]> {
-  if (!webEndpoint(platform)) return []
-  const list = await listAccounts(platform.id, 'web')
+  if (!activeEndpoint(platform)) return []
+  const list = await listAccounts(platform.id, endpointOf(platform))
   return list.map((a) => ({ ...a, active: a.current }))
 }
 
@@ -195,7 +196,7 @@ export async function useAccount(platform: Platform, account: string, log: Logge
 }
 
 export async function currentAccount(platform: Platform): Promise<string | null> {
-  return getCurrent(platform.id, 'web').catch(() => null)
+  return getCurrent(platform.id, endpointOf(platform)).catch(() => null)
 }
 
 export { GUEST }
@@ -205,7 +206,7 @@ export { GUEST }
  * words 是位置参数。auth 命令只解析账号名，不做登录检查。
  */
 async function runAuth(platform: Platform, key: 'auth status' | 'auth logout' | 'auth use', account: string | null, log: Logger, words: string[] = []): Promise<unknown> {
-  const command = webEndpoint(platform)?.commands.get(key)
+  const command = activeEndpoint(platform)?.commands.get(key)
   if (!command || command.status !== 'implemented') throw new CatbusError('NOT_IMPLEMENTED', `${platform.id} 没有 ${key}`)
   const name = account == null ? undefined : checkAccountName(account, { allowGuest: false })
   const inv: Invocation = { platform, command, words, given: {}, log, signal: new AbortController().signal }

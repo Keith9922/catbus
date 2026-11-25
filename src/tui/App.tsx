@@ -8,7 +8,7 @@ import { copyText, openFile, openUrl } from './clipboard.js'
 import { edit, initial, type TextState } from './input.js'
 import { type LogBuffer, bufferLogger } from './logs.js'
 import { Mascot, MASCOT_ROWS } from './MascotView.js'
-import { availability, usable, cliFromInvocation, cliLine, DOWNLOAD_ACTIONS, fields, type FormValue, groupCommands, type PlatformRow, platformRows, primaryCommand, quote, runnableCommand, toInvocation } from './model.js'
+import { availability, usable, cliFromInvocation, cliLine, DOWNLOAD_ACTIONS, fields, type FormValue, endpointOf, groupCommands, type PlatformRow, platformRows, primaryCommand, quote, runnableCommand, toInvocation } from './model.js'
 import { AccountsView, accountKeys, type AccountsState } from './AccountsView.js'
 import { type LoginSession, type LoginView as LoginState, accountsOf, checkAccount, loginCommand, loginFields, loginMethods, logoutAccount, startLogin, useAccount } from './login.js'
 import { ListenScreen } from './ListenScreen.js'
@@ -995,7 +995,7 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
       ) : (
         <T c={accountInfo.loggedIn ? 'green' : 'dim'}>{accountInfo.account ?? (accountInfo.open ? '免登录' : '游客')}</T>
       )}
-      <T c="dim">{'  端 web  '}</T>
+      <T c="dim">{`  端 ${endpointOf(platform)}  `}</T>
     </Box>
   )
 

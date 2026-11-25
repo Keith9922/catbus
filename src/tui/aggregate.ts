@@ -16,7 +16,7 @@ export interface AggregateResult {
   failures: { platform: Platform; error: CatbusError }[]
 }
 
-/** 能参加聚合搜索的平台：web 端有能在界面里运行的 item search。 */
+/** 能参加聚合搜索的平台：默认端有能在界面里运行的 item search。 */
 export function searchable(platforms: readonly Platform[]): Platform[] {
   return platforms.filter((p) => runnableCommand(p, 'item search') != null)
 }

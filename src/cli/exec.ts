@@ -14,7 +14,7 @@ import { checkAutoBind, createHandlerContext, credentialSnapshot, persistCredent
 
 export interface Invocation {
   platform: Platform
-  /** 目前界面只用 web 端。 */
+  /** 不给时用平台的默认端（界面都不给）。 */
   endpoint?: Endpoint
   command: Command
   /** 位置参数，按命令声明的顺序。 */
@@ -40,7 +40,8 @@ export interface Prepared {
 /** 运行前的准备，顺序与 runPlatform 一致：校验 → 身份 → 读文件选项 → 网络配置 → handler 与上下文 → 凭证快照。 */
 export async function prepare(inv: Invocation): Promise<Prepared> {
   const { platform, command, log } = inv
-  const endpoint = inv.endpoint ?? 'web'
+  // 不指定时用平台的默认端，与 CLI 一致（dispatch.parseEndpoint）：多数平台是 web，discord 是 pc
+  const endpoint = inv.endpoint ?? platform.defaultEndpoint
   const ep = platform.endpoints[endpoint]
   if (ep === 'planned') throw new CatbusError('NOT_IMPLEMENTED', `${platform.id} 的 ${endpoint} 端尚未实现`, { detail: { endpoint, status: 'planned' } })
 

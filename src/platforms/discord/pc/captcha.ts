@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { showLink } from '../../../core/login.js'
 import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
@@ -168,7 +169,7 @@ export async function solveCaptcha(ctx: HandlerContext, data: Json): Promise<Hea
     const local = await serveCaptcha(challenge, signal)
     try {
       signal.throwIfAborted()
-      process.stderr.write(`[catbus] 请在浏览器打开 ${local.url} 完成 Discord 人机验证（180 秒内）\n`)
+      showLink(local.url, '请在浏览器打开下面的链接完成 Discord 人机验证（180 秒内），完成后自动继续', `请在浏览器打开 ${local.url} 完成 Discord 人机验证（180 秒内）`, '需要在浏览器里完成 Discord 人机验证')
       openPage(local.url)
       const token = await local.result
       const headers: HeaderPairs = [['X-Captcha-Key', token]]

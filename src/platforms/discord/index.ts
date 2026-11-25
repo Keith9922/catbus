@@ -37,10 +37,10 @@ export default definePlatform({
           supports: ['username', 'passwordStdin', 'code'],
           note: '扫码、账密与凭证导入。账密支持浏览器人机验证、TOTP、短信和 WebAuthn',
           options: {
-            tokenFile: z.string().min(1).optional().describe('从文件读取 Authorization 凭证'),
+            tokenFile: z.string().min(1).optional().describe('从文件读取 Authorization 凭证（token）'),
             tokenStdin: z.boolean().optional().describe('从 stdin 读取 Authorization 凭证'),
-            mfaMethod: z.enum(['totp', 'sms', 'webauthn']).optional().describe('账密 MFA 方式，默认 totp'),
-            undelete: z.boolean().optional().describe('请求恢复待删除账号'),
+            mfaMethod: z.enum(['totp', 'sms', 'webauthn']).optional().describe('账密 MFA 方式，默认 totp（password）'),
+            undelete: z.boolean().optional().describe('请求恢复待删除账号（password）'),
             captcha: z.boolean().optional().describe('在非交互式调用中启用浏览器人机验证'),
           },
           check: (_args, options) => {

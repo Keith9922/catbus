@@ -2,7 +2,7 @@ import { constants, createHash, generateKeyPairSync, type KeyObject, privateDecr
 import { readFile } from 'node:fs/promises'
 import { text as readStreamText } from 'node:stream/consumers'
 import { CatbusError } from '../../../core/errors.js'
-import { finishLogin, freshCredential, interactive, loginContext, prompt, qrcodeScanned, readPassword, showQrcode } from '../../../core/login.js'
+import { finishLogin, freshCredential, interactive, loginContext, prompt, qrcodeScanned, readPassword, showQrcode, uiInstalled } from '../../../core/login.js'
 import { random, sleep } from '../../../core/rand.js'
 import type { HandlerContext } from '../../../core/registry.js'
 import type { AuthStatus } from '../../../core/schemas.js'
@@ -93,7 +93,10 @@ async function importedToken(ctx: HandlerContext): Promise<string> {
   if (typeof ctx.options.tokenFile === 'string') {
     try { return await readFile(ctx.options.tokenFile, 'utf8') } catch { throw new CatbusError('USAGE', '无法读取 Discord 凭证文件') }
   }
-  if (ctx.options.tokenStdin) return process.stdin.isTTY ? prompt('Discord 凭证：', { hidden: true }) : readStreamText(process.stdin)
+  // --token-stdin：终端里隐藏提问，管道里读 stdin。界面接管登录时（interactive() 为 true）一律提问，不读被界面占用的 stdin
+  if (ctx.options.tokenStdin) return process.stdin.isTTY || interactive() ? prompt('Discord 凭证：', { hidden: true }) : readStreamText(process.stdin)
+  // 两个选项都没给：只有界面里（有登录钩子）才提问；CLI 里仍然报 USAGE，行为和以前一样
+  if (uiInstalled()) return prompt('Discord 凭证：', { hidden: true })
   throw new CatbusError('USAGE', '请使用 --token-file 或 --token-stdin 导入 Discord 凭证')
 }
 

@@ -67,6 +67,14 @@ export function setLoginUi(next: LoginUi | null): () => void {
   }
 }
 
+/**
+ * 终端界面是否接管了这次登录（设了 LoginUi 钩子）。平台用它决定“用户没给选项时要不要提问”：
+ * 界面里没有 `--xxx-stdin` 这类开关，只能提问；CLI 里没给选项仍然报 USAGE。
+ */
+export function uiInstalled(): boolean {
+  return ui != null
+}
+
 /** 登录到哪个账号：`-a` > 当前账号 > `default`。 */
 export function loginTarget(ctx: HandlerContext): string {
   return ctx.account ?? 'default'
