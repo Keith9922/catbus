@@ -1,14 +1,17 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CatbusError } from '../src/core/errors.js'
+import { parseCookieInput } from '../src/core/cookies.js'
+import { newCredential, setCurrent, writeCredential } from '../src/core/auth-store.js'
 import { fakeResponse, mockSender } from '../src/core/http.js'
 import { plainText } from '../src/core/normalize.js'
 import { RAW } from '../src/core/schemas.js'
 import * as api from '../src/platforms/weibo/web/api.js'
 import { check, riskCheck, Weibo } from '../src/platforms/weibo/web/client.js'
 import * as cmd from '../src/platforms/weibo/web/commands.js'
+import { mblog } from '../src/platforms/weibo/web/normalize.js'
 import { resolveItem } from '../src/platforms/weibo/web/resolve.js'
 import { bidToMid, fileParams, midToBid } from '../src/platforms/weibo/web/sign.js'
 import { expectRequests, type GoldenCase, type GoldenRequest, loadCase, makeCtx, replay } from './golden.js'
@@ -50,6 +53,10 @@ const CASES: Record<string, (c: GoldenCase) => Promise<unknown>> = {
   user_posted_p1: logged((w) => api.userPosted(w, '1669879400', '1', '')),
   user_posted_p2: logged((w) => api.userPosted(w, '1669879400', '2', '4937540924966431kp2')),
   comments: logged((w) => api.comments(w, '5266778656', MID)),
+  feed_hot_p1: logged((w) => api.feedRecommend(w, null)),
+  feed_hot_p2: logged((w) => api.feedRecommend(w, '{"ul_sid":"fake-ul-sid","ul_hid":"fake-ul-hid","since_id":"5079000000000001"}')),
+  feed_friends_p1: logged((w) => api.feedFollowing(w, null)),
+  feed_friends_p2: logged((w) => api.feedFollowing(w, '5079000000000001')),
   mobile_detail: logged((w) => api.mobileDetail(w, MID)),
   mobile_search: logged((w) => api.mobileSearch(w, '猫 咪&狗', 1)),
   mobile_search_p2: logged((w) => api.mobileSearch(w, '猫', 2)),
@@ -143,10 +150,10 @@ describe('weibo 对拍：命令流程', () => {
     expect(cookies.find((x) => x.name === 'SUB' && x.domain === '.weibo.com')?.value).toBe('_2A25fakeSUB0000')
   })
 
-  it('item search：综合搜索，合并顶层与 card_group 里的微博；只取第一页', async () => {
+  it('item searchM（旧实现，回退）：综合搜索，合并顶层与 card_group 里的微博；只取第一页', async () => {
     const c = loadCase('weibo', 'mobile_search')
     const ctx = loggedCtx({ args: { keyword: '猫 咪&狗' } })
-    const { requests, result, error } = await replay(withVisitor(c, '.weibo.cn'), () => cmd.itemSearch(ctx))
+    const { requests, result, error } = await replay(withVisitor(c, '.weibo.cn'), () => cmd.itemSearchM(ctx))
     if (error) throw error
     expectVisitor(requests[0]!, 'visitor.passport.weibo.cn', 'https://m.weibo.cn/')
     expectRequests(requests.slice(1), visitorCookies(c.requests))
@@ -183,6 +190,43 @@ describe('weibo 对拍：命令流程', () => {
 
     const p2 = loadCase('weibo', 'user_posted_p2')
     const second = await replay(p2, () => cmd.userItems({ ...ctx, cursor: r1.page.cursor }))
+    if (second.error) throw second.error
+    expectRequests(second.requests, p2.requests)
+  })
+
+  it('登录 feed list（recommend）：两页，cursor 是 since_id 对象的紧凑 JSON，原样回传', async () => {
+    const p1 = loadCase('weibo', 'feed_hot_p1')
+    const first = await replay(p1, () => cmd.feedList(loggedCtx()))
+    if (first.error) throw first.error
+    expectRequests(first.requests, p1.requests)
+    const r1 = first.result as { data: any[]; page: { cursor: string } }
+    expect(r1.page).toEqual({ cursor: '{"ul_sid":"fake-ul-sid","ul_hid":"fake-ul-hid","since_id":"5079000000000001"}', has_more: true })
+    expect(r1.data[0]).toMatchObject({ id: '5079000000000001', kind: 'image', url: 'https://weibo.com/10001/OwfakeBid' })
+
+    const p2 = loadCase('weibo', 'feed_hot_p2')
+    const second = await replay(p2, () => cmd.feedList(loggedCtx({ cursor: r1.page.cursor })))
+    if (second.error) throw second.error
+    expectRequests(second.requests, p2.requests)
+  })
+
+  it('登录 feed list --kind hot：与 recommend 是同一条流，请求相同', async () => {
+    const c = loadCase('weibo', 'feed_hot_p1')
+    const { requests, error } = await replay(c, () => cmd.feedList(loggedCtx({ options: { kind: 'hot' } })))
+    if (error) throw error
+    expectRequests(requests, c.requests)
+  })
+
+  it('登录 feed list --kind following：两页，翻页带上一页的 max_id', async () => {
+    const p1 = loadCase('weibo', 'feed_friends_p1')
+    const ctx = loggedCtx({ options: { kind: 'following' } })
+    const first = await replay(p1, () => cmd.feedList(ctx))
+    if (first.error) throw first.error
+    expectRequests(first.requests, p1.requests)
+    const r1 = first.result as { page: { cursor: string } }
+    expect(r1.page).toEqual({ cursor: '5079000000000001', has_more: true })
+
+    const p2 = loadCase('weibo', 'feed_friends_p2')
+    const second = await replay(p2, () => cmd.feedList({ ...ctx, cursor: r1.page.cursor }))
     if (second.error) throw second.error
     expectRequests(second.requests, p2.requests)
   })
@@ -335,7 +379,7 @@ describe('weibo 行为', () => {
     const wall = { status: 200, headers: {}, body: { ok: -100, url: 'https://passport.weibo.com/sso/signin' } }
     const ctx = loggedCtx({ args: { keyword: '猫 咪&狗' } })
     ctx.credential.scopes.main!.cookies.push({ name: 'SUB', value: 'stale', domain: '.weibo.cn', path: '/', expires: null })
-    const renewed = await replay({ ...c, responses: [wall, visitorResponse('.weibo.cn'), ...c.responses] }, () => cmd.itemSearch(ctx))
+    const renewed = await replay({ ...c, responses: [wall, visitorResponse('.weibo.cn'), ...c.responses] }, () => cmd.itemSearchM(ctx))
     if (renewed.error) throw renewed.error
     expect(renewed.requests.map((r) => r.url.split('?')[0])).toEqual([
       'https://m.weibo.cn/api/container/getIndex',
@@ -349,7 +393,7 @@ describe('weibo 行为', () => {
     ])
     expect((renewed.result as any).data).toHaveLength(2)
 
-    const fresh = await replay({ ...c, responses: [visitorResponse('.weibo.cn'), wall] }, () => cmd.itemSearch(loggedCtx({ args: { keyword: '猫' } })))
+    const fresh = await replay({ ...c, responses: [visitorResponse('.weibo.cn'), wall] }, () => cmd.itemSearchM(loggedCtx({ args: { keyword: '猫' } })))
     expect(fresh.requests).toHaveLength(2)
     expect(fresh.error).toMatchObject({ code: 'AUTH_REQUIRED' })
   })
@@ -466,5 +510,366 @@ describe('weibo 纯算', () => {
 
   it('正文 HTML → 纯文本', () => {
     expect(plainText('a<br />b <a href="x"><span class="surl-text">#话题#</span></a><img alt="[笑]" src="y"/> &lt;&amp;&gt;')).toBe('a\nb #话题#[笑] <&>')
+  })
+})
+
+// ---------------------------------------------------------------- feed list：真实响应的解析（请求构造见上面的对拍；这里用真机响应裁剪的 fixture，覆盖视频、广告过滤等形态）
+
+describe('weibo 转发微博的归一化（AGENTS 4.8）', () => {
+  const video = {
+    type: 'video',
+    object_type: 'video',
+    object_id: '1034:5000000000000001',
+    page_pic: { url: 'https://wx2.sinaimg.cn/orj480/fakecover.jpg' },
+    play_count: '1.2万次播放',
+    urls: { mp4_720p_mp4: 'https://f.video.weibocdn.com/o0/fake720.mp4', mp4_hd_mp4: 'https://f.video.weibocdn.com/o0/fakehd.mp4' },
+    media_info: { duration: 12 },
+  }
+  const original = {
+    id: '5000000000000002',
+    bid: 'Orig0001',
+    text: '原微博的正文',
+    user: { id: 2000000002, screen_name: '原作者' },
+    page_info: video,
+    pic_num: 0,
+    attitudes_count: 999,
+  }
+  const repost = (extra: object = {}) => ({
+    id: '5000000000000003',
+    bid: 'Repo0001',
+    text: '转发语',
+    created_at: 'Sat Oct 31 13:56:26 +0800 2026',
+    user: { id: 2000000003, screen_name: '转发者' },
+    pic_num: 0,
+    pic_ids: [],
+    attitudes_count: 213,
+    reposts_count: 21,
+    retweeted_status: original,
+    ...extra,
+  })
+
+  it('转发这条自己没有媒体：kind、cover、media、播放数取原微博，正文、作者、计数仍是转发这条的', () => {
+    const item = mblog(repost())
+    expect(item.id).toBe('5000000000000003')
+    expect(item.text).toBe('转发语')
+    expect(item.author?.name).toBe('转发者')
+    expect(item.stats.likes).toBe(213)
+    expect(item.kind).toBe('video')
+    expect(item.cover).toBe('https://wx2.sinaimg.cn/orj480/fakecover.jpg')
+    expect(item.media.map((x) => [x.type, x.url])).toEqual([['video', 'https://f.video.weibocdn.com/o0/fake720.mp4']])
+    expect(item.stats.views).toBe(12000)
+  })
+
+  it('原微博是图文：media 为原微博的图片', () => {
+    const item = mblog(repost({ retweeted_status: { ...original, page_info: undefined, pic_num: 1, pics: [{ pid: 'p1', large: { url: 'https://wx1.sinaimg.cn/large/p1.jpg', geo: { width: 800, height: 600 } } }] } }))
+    expect(item.kind).toBe('image')
+    expect(item.cover).toBe('https://wx1.sinaimg.cn/large/p1.jpg')
+    expect(item.media.map((x) => x.url)).toEqual(['https://wx1.sinaimg.cn/large/p1.jpg'])
+  })
+
+  it('转发这条自己带图片或卡片时用自己的，不取原微博', () => {
+    const withPic = mblog(repost({ pic_num: 1, pics: [{ pid: 'own', large: { url: 'https://wx1.sinaimg.cn/large/own.jpg' } }] }))
+    expect(withPic.kind).toBe('image')
+    expect(withPic.media.map((x) => x.url)).toEqual(['https://wx1.sinaimg.cn/large/own.jpg'])
+    const withCard = mblog(repost({ page_info: { type: 'webpage', page_title: '链接' } }))
+    expect(withCard.kind).toBe('text')
+    expect(withCard.media).toEqual([])
+  })
+
+  it('不是转发、自己也没有媒体：仍是纯文字', () => {
+    const item = mblog(repost({ retweeted_status: undefined }))
+    expect(item.kind).toBe('text')
+    expect(item.cover).toBeNull()
+    expect(item.media).toEqual([])
+  })
+})
+
+const feedFixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures/weibo', name), 'utf8')
+
+function mockFeed(routes: Record<string, string>) {
+  const calls: { url: string; query: URLSearchParams }[] = []
+  return {
+    calls,
+    restore: mockSender((p) => {
+      const u = new URL(p.url)
+      calls.push({ url: p.url, query: u.searchParams })
+      const body = routes[u.pathname]
+      if (!body) throw new Error(`未录制的请求：${u.pathname}`)
+      return fakeResponse(body, { headers: [['content-type', 'application/json']] })
+    }),
+  }
+}
+
+describe('weibo feed list：解析真实响应（fixture）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('默认 recommend：hottimeline，cursor 是上一页 since_id 对象的 JSON 原文', async () => {
+    const m = mockFeed({ '/ajax/feed/hottimeline': feedFixture('feed_hot.json') })
+    try {
+      const result = await cmd.feedList(loggedCtx())
+      const r = result as { data: any[]; page: { cursor: string | null; has_more: boolean } }
+      expect(m.calls[0]!.url).toBe(
+        'https://weibo.com/ajax/feed/hottimeline?since_id=0&refresh=0&group_id=102803&containerid=102803&extparam=discover%7Cnew_feed&max_id=0&count=20',
+      )
+      expect(r.data[0]).toMatchObject({ id: '5369000000000000', kind: 'video', author: { id: '10000', name: '测试用户0' } })
+      expect(r.page.cursor).toBe('{"ul_sid":"","ul_hid":"","since_id":"5368000000000001"}')
+      expect(r.page.has_more).toBe(true)
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('recommend 翻页：把 cursor 原样回传成 since_id 参数', async () => {
+    const m = mockFeed({ '/ajax/feed/hottimeline': feedFixture('feed_hot.json') })
+    try {
+      const ctx = loggedCtx({ cursor: '{"ul_sid":"","ul_hid":"","since_id":"5368000000000001"}' })
+      await cmd.feedList(ctx)
+      expect(m.calls[0]!.query.get('since_id')).toBe('{"ul_sid":"","ul_hid":"","since_id":"5368000000000001"}')
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('following：friendstimeline，cursor 是上一页的 max_id；第二页带 max_id', async () => {
+    const m = mockFeed({ '/ajax/feed/friendstimeline': feedFixture('feed_friends.json') })
+    try {
+      const first = { result: await cmd.feedList(loggedCtx({ options: { kind: 'following' } })) }
+      expect(m.calls[0]!.url).toBe('https://weibo.com/ajax/feed/friendstimeline?list_id=&refresh=4&since_id=0&count=20')
+      const r1 = (first as { result: any }).result as { page: { cursor: string | null } }
+      expect(r1.page.cursor).toBe('5368000000000099')
+
+      m.calls.length = 0
+      const second = { result: await cmd.feedList(loggedCtx({ options: { kind: 'following' }, cursor: r1.page.cursor! })) }
+      expect(m.calls[0]!.query.get('max_id')).toBe('5368000000000099')
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('hot 与 recommend 是同一条流：同样的请求', async () => {
+    const m = mockFeed({ '/ajax/feed/hottimeline': feedFixture('feed_hot.json') })
+    try {
+      await cmd.feedList(loggedCtx({ options: { kind: 'hot' } }))
+      expect(m.calls[0]!.url).toContain('/ajax/feed/hottimeline?')
+    } finally {
+      m.restore()
+    }
+  })
+
+})
+
+describe('weibo feed list（CLI）', () => {
+  useTempHome()
+
+  it('未登录报 AUTH_REQUIRED（web 端 feed 需要登录）', async () => {
+    const r = await cli('weibo', 'feed', 'list')
+    expect(r.env.error).toMatchObject({ code: 'AUTH_REQUIRED', hint: 'catbus weibo auth login' })
+    expect(r.code).toBe(3)
+  })
+
+  it('登录后输出信封与 Item；--kind following 同样可用', async () => {
+    const cred = newCredential({ platform: 'weibo', endpoint: 'web', account: 'default', method: 'cookie' })
+    cred.scopes.main!.cookies = parseCookieInput(COOKIES, '.weibo.com')
+    await writeCredential(cred)
+    await setCurrent('weibo', 'web', 'default')
+    const m = mockFeed({
+      '/ajax/feed/hottimeline': feedFixture('feed_hot.json'),
+      '/ajax/feed/friendstimeline': feedFixture('feed_friends.json'),
+    })
+    try {
+      const r = await cli('weibo', 'feed', 'list', '--limit', '1')
+      expect(r.code).toBe(0)
+      expect(r.env).toMatchObject({ ok: true, platform: 'weibo', resource: 'feed', action: 'list', account: 'default', error: null })
+      expect(r.env.data[0]).toMatchObject({ id: '5369000000000000', kind: 'video' })
+      expect(r.env.page.has_more).toBe(true)
+
+      const r2 = await cli('weibo', 'feed', 'list', '--kind', 'following', '-o', 'jsonl')
+      expect(r2.code).toBe(0)
+      expect(r2.stdout.split('\n').filter(Boolean)).toHaveLength(1)
+    } finally {
+      m.restore()
+    }
+  })
+})
+
+// ---------------------------------------------------------------- keyword hot：非上游，没有对拍；fixture 由真机响应裁剪，词换成了占位词
+
+describe('weibo keyword hot（非上游，fixture）', () => {
+  useTempHome()
+
+  it('按榜单顺序输出 Keyword，去掉广告位，不收置顶词', async () => {
+    const m = mockFeed({ '/ajax/side/hotSearch': feedFixture('hot_search.json') })
+    try {
+      const result = await cmd.keywordHot(loggedCtx())
+      expect(m.calls.map((c) => c.url)).toEqual(['https://weibo.com/ajax/side/hotSearch'])
+      expect(result).toEqual([
+        { text: '热搜一', heat: 1152710 },
+        { text: '热搜二', heat: 807411 },
+        { text: '热搜三', heat: 674425 },
+      ])
+      expect((result[1] as any)[RAW]).toMatchObject({ label_name: '新' })
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('CLI：登录后输出信封；注册表标注非上游', async () => {
+    const cred = newCredential({ platform: 'weibo', endpoint: 'web', account: 'default', method: 'cookie' })
+    cred.scopes.main!.cookies = parseCookieInput(COOKIES, '.weibo.com')
+    await writeCredential(cred)
+    await setCurrent('weibo', 'web', 'default')
+    const m = mockFeed({ '/ajax/side/hotSearch': feedFixture('hot_search.json') })
+    try {
+      const r = await cli('weibo', 'keyword', 'hot')
+      expect(r.code).toBe(0)
+      expect(r.env).toMatchObject({ ok: true, platform: 'weibo', resource: 'keyword', action: 'hot', error: null })
+      expect(r.env.data.map((k: any) => k.text)).toEqual(['热搜一', '热搜二', '热搜三'])
+    } finally {
+      m.restore()
+    }
+    const p = await cli('platforms', 'weibo')
+    expect(p.env.data.commands).toContainEqual(expect.objectContaining({ resource: 'keyword', action: 'hot', status: 'implemented', upstream: 'partial', note: expect.stringContaining('非上游') }))
+  })
+})
+
+// ---------------------------------------------------------------- item search：主站综合搜索（非上游，见 api.siteSearch；没有对拍，用真机响应裁剪的 fixture 覆盖）
+
+const siteFixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures/weibo', name), 'utf8')
+
+/** 按完整 URL 回放（搜索的两页是同一个路径 /weibo）。 */
+function mockSite(routes: Record<string, string | { status: number; location?: string; body?: string }>) {
+  const calls: { url: string; headers: [string, string][] }[] = []
+  return {
+    calls,
+    restore: mockSender((p) => {
+      calls.push({ url: p.url, headers: p.headers })
+      const r = routes[p.url]
+      if (r == null) throw new Error(`未录制的请求：${p.url}`)
+      if (typeof r === 'string') return fakeResponse(r, { headers: [['content-type', 'text/html']] })
+      return fakeResponse(r.body ?? '', {
+        status: r.status,
+        headers: r.location ? [['location', r.location]] : [['content-type', 'text/html']],
+      })
+    }),
+  }
+}
+
+describe('weibo item search：主站综合搜索（fixture）', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('第一页：请求 s.weibo.com/weibo?q=…&page=1，卡片解析成统一的 Item，广告卡过滤', async () => {
+    const m = mockSite({ 'https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=1': siteFixture('site_search_p1.html') })
+    try {
+      const result = await cmd.itemSearch(loggedCtx({ args: { keyword: '咖啡' } }))
+      const r = result as { data: any[]; page: { cursor: string | null; has_more: boolean } }
+      expect(m.calls).toHaveLength(1)
+      expect(m.calls[0]!.url).toBe('https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=1')
+      expect(Object.fromEntries(m.calls[0]!.headers)).toMatchObject({ referer: 'https://s.weibo.com/' })
+      // 广告卡（wb-ad-tile）被过滤，其余按页面顺序
+      expect(r.data.map((x) => x.id)).toEqual(['5100000000000001', '5100000000000002', '5100000000000003'])
+      expect(r.data[0]).toMatchObject({
+        kind: 'text',
+        url: 'https://weibo.com/10001/FakeBid0001',
+        text: '周末愉快\n[来抱抱]',
+        author: { id: '10001', name: '测试用户A' },
+      })
+      expect(r.data[0]!.stats).toMatchObject({ likes: 289, comments: 10, shares: 4 })
+      expect(r.data[1]).toMatchObject({
+        kind: 'image',
+        text: '第一行\n第二行 #咖啡#',
+        cover: 'https://wx1.sinaimg.cn/large/fakepic1.jpg',
+      })
+      expect(r.data[1]!.media.map((x: any) => x.url)).toEqual([
+        'https://wx1.sinaimg.cn/large/fakepic1.jpg',
+        'https://wx2.sinaimg.cn/large/fakepic2.jpg',
+      ])
+      expect(r.data[2]).toMatchObject({
+        kind: 'video',
+        cover: 'https://wx4.sinaimg.cn/orj480/fakeposter.jpg',
+        media: [{ type: 'video', url: 'https://f.video.weibocdn.com/o0/fakevideo.mp4?label=mp4_720p&Expires=1899999999&ssig=FakeSig' }],
+      })
+      expect(r.page).toEqual({ cursor: '2', has_more: true })
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('翻页：cursor 是页码，第二页请求 page=2；分页器没有 page=3 就结束', async () => {
+    const m = mockSite({
+      'https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=1': siteFixture('site_search_p1.html'),
+      'https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=2': siteFixture('site_search_p2.html'),
+    })
+    try {
+      const ctx = loggedCtx({ args: { keyword: '咖啡' } })
+      const first = (await cmd.itemSearch(ctx)) as { page: { cursor: string | null } }
+      expect(first.page.cursor).toBe('2')
+
+      const second = (await cmd.itemSearch({ ...ctx, cursor: first.page.cursor! })) as { data: any[]; page: { cursor: string | null; has_more: boolean } }
+      expect(m.calls[1]!.url).toBe('https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=2')
+      expect(second.data.map((x) => x.id)).toEqual(['5100000000000010'])
+      expect(second.data[0]).toMatchObject({ text: '十月的一条微博', created_at: '2026-10-01T09:00:00+08:00' })
+      expect(second.page).toEqual({ cursor: null, has_more: false })
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('未登录：s.weibo.com 302 到 passport → AUTH_EXPIRED（有账号但登录态失效）；页面要求验证 → RISK_CONTROL', async () => {
+    const m = mockSite({
+      'https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=1': { status: 302, location: 'https://passport.weibo.com/sso/signin?entry=wb' },
+      'https://s.weibo.com/weibo?q=%E7%8C%AB&page=1': '<html>…geetest 验证页…</html>',
+    })
+    try {
+      await expect(cmd.itemSearch(loggedCtx({ args: { keyword: '咖啡' } }))).rejects.toMatchObject({ code: 'AUTH_EXPIRED' })
+      await expect(cmd.itemSearch(loggedCtx({ args: { keyword: '猫' } }))).rejects.toMatchObject({ code: 'RISK_CONTROL' })
+    } finally {
+      m.restore()
+    }
+  })
+
+  it('parseSiteSearch：相对时间按给定 now 归一化成 YYYY-MM-DD HH:MM（n.time 只认这个格式）', () => {
+    const now = new Date('2026-11-21T13:00:00+08:00')
+    const items = cmd.parseSiteSearch(siteFixture('site_search_p1.html'), now)
+    expect(items.map((x) => x.created_at)).toEqual(['2026-11-21 13:14', '2026-11-20 11:30', '2026-11-21 12:57'])
+    expect(items.map((x) => x.mid)).toEqual(['5100000000000001', '5100000000000002', '5100000000000003'])
+  })
+
+  it('parseSiteSearch：相对时间按北京时间算，和运行机器的时区无关', () => {
+    // 北京时间 11-22 07:30 = UTC 11-21 23:30 = 洛杉矶 11-21 15:30：按本机时区算会差一天
+    const now = new Date('2026-11-22T07:30:00+08:00')
+    const html = ['今天09:00', '昨天23:10', '3分钟前', '2小时前', '11月20日 11:30', '12月31日 08:00']
+      .map((t, i) => `<div class="card-wrap" action-type="feed_list_item" mid="51000000000000${10 + i}"><p class="from"><a>${t}</a></p></div>`)
+      .join('')
+    const want = ['2026-11-22 09:00', '2026-11-21 23:10', '2026-11-22 07:27', '2026-11-22 05:30', '2026-11-20 11:30', '2025-12-31 08:00']
+    const tz = process.env.TZ
+    try {
+      for (const zone of ['Asia/Shanghai', 'UTC', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+        process.env.TZ = zone
+        expect(cmd.parseSiteSearch(html, now).map((x) => x.created_at), zone).toEqual(want)
+      }
+    } finally {
+      process.env.TZ = tz
+    }
+  })
+
+  it('parseSiteSearch：长微博优先取 feed_list_content_full，去掉「展开 / 收起」链接', () => {
+    const html =
+      '<div class="card-wrap" action-type="feed_list_item" mid="5100000000000020">' +
+      '<p class="txt" node-type="feed_list_content" nick-name="A">前半段…<a href="javascript:void(0);" action-type="fl_unfold">展开<i>c</i></a></p>' +
+      '<p class="txt" node-type="feed_list_content_full" nick-name="A" style="display: none">前半段和后半段的完整正文<a href="javascript:void(0);" action-type="fl_fold">收起<i>d</i></a></p>' +
+      '</div>'
+    expect(cmd.parseSiteSearch(html, new Date('2026-11-22T07:30:00+08:00'))[0]!.text_raw).toBe('前半段和后半段的完整正文')
+  })
+
+  it('整页卡片都被过滤（全是广告）时，分页器里有下一页就继续翻', async () => {
+    const ad = '<div class="card-wrap wb-ad-tile" action-type="feed_list_item" mid="5100000000000099">推广</div>'
+    const m = mockSite({ 'https://s.weibo.com/weibo?q=%E5%92%96%E5%95%A1&page=1': `${ad}<a href="/weibo?q=%E5%92%96%E5%95%A1&page=2">下一页</a>` })
+    try {
+      const r = (await cmd.itemSearch(loggedCtx({ args: { keyword: '咖啡' } }))) as { data: any[]; page: { cursor: string | null; has_more: boolean } }
+      expect(r.data).toEqual([])
+      expect(r.page).toEqual({ cursor: '2', has_more: true })
+    } finally {
+      m.restore()
+    }
   })
 })

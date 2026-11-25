@@ -75,7 +75,9 @@ export default definePlatform({
         }),
         'item related': impl('full', 'itemRelated'),
         'item list': impl('full', 'itemList'),
-        'item media': impl('full', 'itemMedia'),
+        'item media': impl('full', 'itemMedia', {
+          options: { allTracks: z.boolean().optional().describe('返回 DASH 的全部轨道（各画质、编码的视频轨和全部音频轨），不只挑最高画质的一路') },
+        }),
         'item download': impl('full', 'itemDownload'),
         'item like': impl('full', 'itemLike'),
         'item unlike': impl('full', 'itemUnlike'),
@@ -85,6 +87,7 @@ export default definePlatform({
           supports: ['title', 'text', 'video', 'cover', 'tag', 'category', 'visibility', 'schedule'],
           options: {
             cover43: z.string().optional().describe('4:3 封面图片路径（稿件列表页）；B 站双封面，和 --cover 各给一张'),
+            series: z.string().optional().describe('发布后加进合集（合集 ID 或合集链接）；挂到合集第一个小节下'),
             visibility: visibility('public', 'private'),
             source: z.string().optional().describe('转载来源；给出时按转载投稿，不给为自制'),
             dynamic: z.string().optional().describe('同步到动态的文案'),
@@ -153,7 +156,10 @@ export default definePlatform({
         }),
 
         'live get': impl('full', 'liveGet', withRoom()),
-        'live list': 'none',
+        'live list': impl('partial', 'liveList', {
+          note: '非上游：上游没有直播列表接口，请求按网页端直播首页（getListV2）和分区页（second/getList，wbi 签名）补的，没有对拍；不带 --category 是首页推荐，--category 取 live categories 的父分区或子分区 id',
+          options: { category: CATEGORY },
+        }),
         'live search': impl('full', 'liveSearch'),
         'live categories': impl('full', 'liveCategories'),
         'live listen': impl('full', 'liveListen', withRoom()),
@@ -172,7 +178,9 @@ export default definePlatform({
         'live stop': impl('full', 'liveStop'),
 
         'keyword suggest': 'none',
-        'keyword hot': 'none',
+        'keyword hot': impl('partial', 'keywordHot', {
+          note: '非上游：上游没有热搜接口，请求按网页端搜索框补的（x/web-interface/wbi/search/square），没有对拍；最多 50 条，不含置顶词',
+        }),
 
         'notice list': 'none',
         'notice count': 'none',
@@ -196,7 +204,7 @@ export default definePlatform({
         'folder update': 'none',
         'folder delete': 'none',
 
-        'series list': 'none',
+        'series list': impl('partial', 'seriesList', { note: '非上游：创作中心合集管理接口（x2/creative/web/seasons），只能列自己的合集' }),
         'series items': 'none',
 
         'history list': 'none',
@@ -217,6 +225,25 @@ export default definePlatform({
           handler: h('itemCoin'),
         },
         'item triple': { upstream: 'full', summary: '一键三连', args: [item], auth: 'required', confirm: true, output: '{id}', handler: h('itemTriple') },
+        'series add': {
+          upstream: 'partial',
+          summary: '把稿件加进合集',
+          args: [{ name: 'series', summary: '合集：合集 ID，或空间页合集链接（带 sid=）' }, item],
+          auth: 'required',
+          output: '{id}',
+          handler: h('seriesAdd'),
+          note: '非上游：x2/creative/web/season/section/episodes/add，只能加进自己创建的合集，挂到合集的第一个小节下',
+        },
+        'series sort': {
+          upstream: 'partial',
+          summary: '按发布时间重排合集顺序',
+          args: [{ name: 'series', summary: '合集：合集 ID，或空间页合集链接（带 sid=）' }],
+          options: { order: z.enum(['asc', 'desc']).default('asc').describe('asc 最早在前，desc 最新在前') },
+          auth: 'required',
+          output: '{id moved}',
+          handler: h('seriesSort'),
+          note: '非上游：x2/creative/web/season/section/edit，只改小节内顺序；合集自己的「排序方式」开关仍需网页端设置',
+        },
         'item subtitles': { upstream: 'full', summary: '字幕', args: [item], auth: 'required', output: 'Subtitle[]', handler: h('itemSubtitles') },
         'danmaku list': { upstream: 'full', summary: '视频弹幕', args: [item], auth: 'required', output: 'Danmaku[]', handler: h('danmakuList') },
         'danmaku send': {

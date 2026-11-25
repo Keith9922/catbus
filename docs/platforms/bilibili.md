@@ -8,7 +8,7 @@
 | 上游仓库 | [cv-cat/BilibiliApis](https://github.com/cv-cat/BilibiliApis) |
 | 移植基线 | master 上的 [`0234d81`](https://github.com/cv-cat/BilibiliApis/commit/0234d8188b40314d011358d60424bb88fd291a1f)，记录在 [`src/platforms/bilibili/UPSTREAM`](../../src/platforms/bilibili/UPSTREAM) |
 | 端 | web ✓ · app ○ 规划中 · pc ○ 规划中 |
-| 命令（web） | 已实现 49 条（✓ 41 · ◐ 8），规划中 ○ 29 条 |
+| 命令（web） | 已实现 50 条（✓ 41 · ◐ 9），规划中 ○ 28 条 |
 
 B 站是 catbus 的参考实现（`src/platforms/bilibili/web/`），也是 10 个平台里登录方式最全的。命令表由注册表生成，与 `catbus platforms bilibili` 一致；选项以 `catbus bilibili <resource> <action> --help` 为准。通用的命令语法、输出结构见 [AGENTS.md 第 4 节](../../AGENTS.md#4-命令规范)。
 
@@ -60,12 +60,12 @@ B 站是 catbus 的参考实现（`src/platforms/bilibili/web/`），也是 10 �
 | `item related` | ✓ | 相关推荐。 |
 | `item list` | ✓ | 我发布的稿件，带审核状态。 |
 | `item media` | ✓ | 稿件的媒体地址。 |
-| `item download` | ✓ | 下载稿件的媒体。 |
+| `item download` | ✓ | 下载稿件的媒体，可同时导出信息和评论（`--meta`、`--comments`）。 |
 | `item like` | ✓ | 点赞。 |
 | `item unlike` | ✓ | 取消点赞。 |
 | `item collect` | ✓ | 收藏。私有选项 `--folder`。 |
 | `item uncollect` | ✓ | 取消收藏。私有选项 `--folder`。 |
-| `item publish` | ✓ | 发布稿件。必须给 `--video`、`--title`、至少一个 `--tag` 和 `--category`（取值见 `item categories`）。取值：`--visibility` public / private。支持 `--schedule` 定时发布（ISO 时间，B 站要求 2 小时后、15 天内）。不支持 `--image`、`--topic`、`--mention`、`--poi`、`--price`。私有选项 `--source`、`--dynamic`、`--allow-reprint`、`--cover43`。 |
+| `item publish` | ✓ | 发布稿件。必须给 `--video`、`--title`、至少一个 `--tag` 和 `--category`（取值见 `item categories`）。取值：`--visibility` public / private。支持 `--schedule` 定时发布（ISO 时间，B 站要求 2 小时后、15 天内）。不支持 `--image`、`--topic`、`--mention`、`--poi`、`--price`。私有选项 `--source`、`--dynamic`、`--allow-reprint`、`--cover43`、`--series`。 |
 | `item edit` | ✓ | 编辑已投稿件。不给 `--video` 时只改资料，按编辑页接口取原稿的分 P（`filename` + `cid`）；`--cover` 是 16:9（播放页）、`--cover43` 是 4:3（稿件列表页），缺省沿用原图；`--schedule` 改期 / `none` 取消定时，缺省沿用原稿；不给 `--visibility` 时沿用原稿的可见性。提交后进入重新审核。平台扩展。 |
 | `item delete` | ◐ | 删除稿件。需要人机验证（极验点选），catbus 还不能自动通过，会报 `RISK_CONTROL`。危险操作，需要确认。 |
 | `item categories` | ✓ | 稿件分类，即 `--category` 的取值。 |
@@ -95,6 +95,7 @@ B 站是 catbus 的参考实现（`src/platforms/bilibili/web/`），也是 10 �
 | 命令 | 状态 | 说明 |
 |---|---|---|
 | `live get` | ✓ | 直播间信息。 |
+| `live list` | ◐ | 正在直播的直播间。不带 `--category` 为直播首页推荐；`--category` 取 `live categories` 的父分区或子分区 id。非上游：请求按网页端直播首页和分区页补的。 |
 | `live search` | ✓ | 搜索直播。 |
 | `live categories` | ✓ | 直播分类。 |
 | `live listen` | ✓ | 监听弹幕、礼物、进场等事件。持续输出 jsonl。 |
@@ -104,7 +105,7 @@ B 站是 catbus 的参考实现（`src/platforms/bilibili/web/`），也是 10 �
 | `live media` | ✓ | 直播流地址。 |
 | `live start` | ✓ | 开播。`--category` 为直播分区，取值见 `live categories`。 |
 | `live stop` | ✓ | 下播。 |
-| `live list`、`live like`、`live rank`、`live replays` | ○ | 规划中 |
+| `live like`、`live rank`、`live replays` | ○ | 规划中 |
 
 ### media
 
@@ -147,16 +148,30 @@ B 站是 catbus 的参考实现（`src/platforms/bilibili/web/`），也是 10 �
 | `draft get` | ✓ | 专栏草稿。平台扩展。 |
 | `draft delete` | ✓ | 删专栏草稿。平台扩展。危险操作，需要确认。 |
 
+### series
+
+| 命令 | 状态 | 说明 |
+|---|---|---|
+| `series list` | ◐ | 我创建的合集：id、标题、集数、链接。非上游：创作中心合集管理接口（`x2/creative/web/seasons`），只能列自己的合集。 |
+| `series items` | ○ | 规划中。 |
+| `series add` | ✓ | 把已发布的稿件加进合集（`x2/creative/web/season/section/episodes/add`），挂到合集的第一个小节下。平台扩展。 |
+| `series sort` | ◐ | 按发布时间重排合集第一个小节里的稿件（`--order asc` 最早在前，默认；`desc` 最新在前）。非上游：`x2/creative/web/season/section/edit`，合集自己的「排序方式」开关仍需网页端设置。平台扩展。 |
+
+### keyword
+
+| 命令 | 状态 | 说明 |
+|---|---|---|
+| `keyword hot` | ◐ | 热搜词：网页端搜索框下的「bilibili 热搜」，按热度排序，`heat` 为热度值。非上游：请求按网页端补的（`x/web-interface/wbi/search/square`），最多 50 条，不含置顶词。 |
+| `keyword suggest` | ○ | 规划中 |
+
 ### 整组规划中
 
 下面这些 resource 在本平台还没有已实现的命令，执行时都返回 `NOT_IMPLEMENTED`（退出码 4）。
 
 | resource | 命令 |
 |---|---|
-| `keyword` | `suggest` `hot` |
 | `notice` | `list` `count` |
 | `msg` | `list` `history` `send` `listen` `read` `revoke` `delete` |
-| `series` | `list` `items` |
 | `history` | `list` |
 | `topic` | `search` |
 

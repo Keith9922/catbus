@@ -58,8 +58,8 @@
 | `item search` | ✓ | 搜索笔记。取值：`--sort` general / latest / popular / comments / collects；`--type` all / video / image；`--time` all / day / week / half_year。 |
 | `item list` | ✓ | 我发布的笔记，带审核状态。走创作者中心（creator 子站点）。 |
 | `item media` | ✓ | 笔记的媒体地址。 |
-| `item download` | ✓ | 下载笔记的媒体。 |
-| `item publish` | ✓ | 发布笔记。走创作者中心；`--image` 和 `--video` 二选一，视频要同时给 `--cover`；`--poi` 要和 `--poi-name` 一起用。取值：`--visibility` public / private。不支持 `--mention`、`--category`、`--price`。私有选项 `--poi-name`。 |
+| `item download` | ✓ | 下载笔记的媒体，可同时导出信息和评论（`--meta`、`--comments`）。 |
+| `item publish` | ✓ | 发布笔记。走创作者中心；`--image` 和 `--video` 二选一，视频要同时给 `--cover`；`--poi` 要和 `--poi-name` 一起用。取值：`--visibility` public / private。不支持 `--mention`、`--category`、`--price`。私有选项 `--poi-name`、`--original`、`--ai-generated`。 |
 | `item related`、`item like`、`item unlike`、`item collect`、`item uncollect`、`item delete` | ○ | 规划中 |
 
 ### comment
@@ -74,7 +74,7 @@
 
 | 命令 | 状态 | 说明 |
 |---|---|---|
-| `feed list` | ◐ | 推荐 / 热门 / 关注流。following 规划中。取值：`--kind` recommend / following。 |
+| `feed list` | ✓ | 推荐 / 热门 / 关注流。取值：`--kind` recommend。 |
 | `feed categories` | ✓ | 推荐流分类。 |
 
 ### live
@@ -156,6 +156,7 @@
 | 命令 | 选项 | 说明 |
 |---|---|---|
 | `item publish` | `--poi-name <名称>`，可配 `--poi <id>` | 地点。小红书的地点只能按名称搜，所以 `--poi` 要和 `--poi-name` 一起用（取 id 相同的那个）；只给 `--poi-name` 时取名称完全相同的；都找不到时报 `USAGE` 并列出相近的地点。先用 `catbus xhs poi search <名称>` 查名称和 id |
+| `item publish` | `--original`、`--ai-generated` | 原创声明、「笔记含 AI 合成内容」声明，默认都不声明。不能和 `--schedule` 一起用（定时发布带不了声明，会报 `USAGE`） |
 
 小红书没有扩展命令。定义见 [AGENTS.md 4.7](../../AGENTS.md#47-平台扩展)。
 
@@ -208,6 +209,12 @@ catbus xhs live listen <room_id> --duration 10m > live.jsonl
   其他验证方式（如 `124` App 扫码、滑块）仍报 `RISK_CONTROL`（`detail.kind` 为 `captcha`），`hint` 提示改用 cookie 导入。cookie 导入实测可用。
 - **评论接口间歇性要求人机验证**：`comment list` 偶尔返回 HTTP 461（`verifytype 124`），请求越密越容易触发。报 `RISK_CONTROL`，`error.hint` 和 `detail.verify_url` 里是网页验证链接：在登录了同一账号的浏览器里打开、完成验证后再重试。不验证时有时几分钟自己恢复，也见过持续 8 小时以上的；批量翻页时放慢节奏。
 - **字段恒为空**：列表里的 `stats.views`（公开接口不返回播放量）、`keyword hot` 的 `heat`（热搜接口不给热度值）。
+- **互动数的精度因命令而异**：同一篇笔记在不同命令里的 `stats` 可能不一样，因为平台各接口给的数字口径不同，catbus 只做原样换算（「1.8万」→ 18000）。
+  - `item search`：精确值（如 18471）。
+  - `item get`：过万后是平台展示用的取整值（「1.8万」→ 18000、「2万」→ 20000），不过万时是精确值。
+  - `user items` / `likes` / `collects`：只有 `likes`，同样过万取整；`comments`、`collects`、`shares` 接口不返回，为 null。
+  - 需要精确值时用 `item search` 搜到这篇笔记再取。
+  - `user get` 的 `stats.likes` 是主页上的「获赞与收藏」合计，不是单独的获赞数。
 - **还没真机验证**：`msg send` / `read` / `revoke` / `delete`、`msg listen`、`live listen`、`live send`。关注列表与群聊的字段名参考了第三方代码（上游没有样本）。
 - **删不掉笔记**：`item delete` 上游没有（○），发出去的笔记要在 App 里手动删除。测试发布请用 `--visibility private`。
 - **视频发布要给封面**：catbus 不解码视频，截不了首帧，`--video` 必须配 `--cover`。

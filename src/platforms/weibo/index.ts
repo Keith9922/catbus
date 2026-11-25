@@ -29,7 +29,7 @@ export default definePlatform({
         'user unfollow': 'none',
 
         'item get': impl('full', 'itemGet'),
-        'item search': impl('partial', 'itemSearch', { note: '只能取第一页（m.weibo.cn 的访客从第二页起要求登录）' }),
+        'item search': impl('full', 'itemSearch', { note: '主站 s.weibo.com 综合搜索，登录态下可翻页（cursor 即页码）' }),
         'item list': 'none',
         'item media': 'none',
         'item download': 'none',
@@ -56,7 +56,11 @@ export default definePlatform({
         'comment like': 'none',
         'comment unlike': 'none',
 
-        'feed list': { upstream: 'none', options: { kind: filter.kind('recommend', 'hot', 'following') } },
+        // WeiboApis.getHotTimeline / getFriendsTimeline。hot 与 recommend 是同一条流（hottimeline），只声明 recommend / following
+        'feed list': impl('full', 'feedList', {
+          options: { kind: filter.kind('recommend', 'following') },
+          note: '热门（hot）与推荐是同一条流，用 recommend；只支持登录账号',
+        }),
 
         'live get': 'none',
         'live list': 'none',
@@ -75,7 +79,9 @@ export default definePlatform({
         'live stop': 'none',
 
         'keyword suggest': 'none',
-        'keyword hot': 'none',
+        'keyword hot': impl('partial', 'keywordHot', {
+          note: '非上游：上游没有热搜接口，请求按网页端热搜榜补的（weibo.com/ajax/side/hotSearch），没有对拍；去掉广告位，不含置顶词',
+        }),
 
         'notice list': 'none',
         'notice count': 'none',

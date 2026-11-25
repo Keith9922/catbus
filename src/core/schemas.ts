@@ -143,6 +143,8 @@ export interface Event {
   user: UserRef | null
   text: string | null
   gift: { name: string; count: number } | null
+  /** 直播间实时数据（在线人数、累计点赞），消息不带时为 null */
+  stats: { viewers: number | null; likes: number | null } | null
 }
 
 export interface Gift {
@@ -212,7 +214,8 @@ export interface Account {
 
 export interface File {
   path: string
-  type: 'image' | 'video' | 'audio' | 'torrent'
+  /** `data` 是 `item download --meta` 写出的帖子信息与评论（ExportDoc，见 core/export.ts）。 */
+  type: 'image' | 'video' | 'audio' | 'torrent' | 'data'
   url: string | null
   size: number
 }
@@ -272,6 +275,10 @@ export interface Ticket {
   url: string
   train_no: string
   type: string
+  /** 本车次的始发站 */
+  start: { code: string; name: string }
+  /** 本车次的终到站 */
+  end: { code: string; name: string }
   from: TicketStation
   to: TicketStation
   depart: string

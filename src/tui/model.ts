@@ -25,6 +25,7 @@ export const METHOD_LABEL: Record<LoginMethod, string> = {
   cookie: '导入 cookie',
   oauth: '浏览器授权',
   apikey: 'API Key',
+  token: '导入凭证',
 }
 
 /** 能在界面里一次取回结果：已实现、动作是读取类或下载，且不是长连接、不需要确认。 */

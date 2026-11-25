@@ -8,9 +8,11 @@ import { type AccountUser, type AuthStatus, type Event, type Keyword, RAW, type 
 import { reconnecting } from '../../../core/stream.js'
 import { authError, isGuest, paged } from '../../../core/toolkit.js'
 import * as api from './api.js'
-import { MEDIA_UA, type YtClient, yt } from './client.js'
+import { MEDIA_UA, type YtClient, TV_UA, yt } from './client.js'
 import * as norm from './normalize.js'
 import { PotError, poMinter } from './pot.js'
+import * as playerjs from './playerjs.js'
+import { playerJsTest } from './playerjs.js'
 import { studio, studioConfig } from './studio.js'
 import {
   CHANNEL_TAB,
@@ -245,24 +247,64 @@ function assertVideo(ctx: Ctx, player: any, id: string): void {
 }
 
 /**
- * 媒体地址：VISIONOS 客户端的 player。人机验证、年龄限制等拿不到地址时按 playabilityStatus 报错。
- * 被「Sign in to confirm you're not a bot」拦下（同一出口 IP 请求多了会发生）时，VISIONOS 带
- * cookie 也没用（这个客户端不支持登录），改走 iOS + PO token 的兜底路径（token 由 pot.ts 生成）。
+ * 媒体地址，按 yt-dlp 的客户端顺序（_DEFAULT_CLIENTS）：
+ * 1. tv_samsung：首选，格式上限最高（4K AV1/vp9 的全部变体）；地址全是 signatureCipher + n 挑战，
+ *    用 player JS 解算（playerjs.ts）。player JS / 解算失败时退到下一条。
+ * 2. visionos：明文直链，不需要解算；格式上限较低。
+ * 被「Sign in to confirm you're not a bot」拦下（同一出口 IP 请求多了会发生）时，两个客户端都不带
+ * cookie（都不支持登录），改走 iOS + PO token 的兜底路径（token 由 pot.ts 生成）。
  */
 async function mediaOf(c: YtClient, id: string) {
+  // 首选 tv_samsung：player JS（含 STS）+ player + 解算
+  try {
+    const js = await playerjs.playerJs(c, await playerJsPath(c))
+    const player = await c.tvPlayer(id, js.sts)
+    const ps = player?.playabilityStatus ?? {}
+    if (!isBot(ps) && ps.status !== 'UNPLAYABLE') {
+      const media = playableMedia(player, id, ps, js.code, 'tv')
+      if (media.length) return { media, title: (player?.videoDetails?.title as string | undefined) ?? null }
+      // tv_samsung 不给格式（年龄限制等）时按它的 playabilityStatus 报错，与 visionos 的报错一致
+    }
+    if (isBot(ps)) c.ctx.log.warn('tv_samsung player 被人机验证拦下')
+    c.ctx.log.debug(`tv_samsung 不可用（${ps.status ?? 'no status'}），退回 visionos`)
+  } catch (err) {
+    if (err instanceof CatbusError && err.code === 'RISK_CONTROL') throw err
+    c.ctx.log.debug(`tv_samsung 路径失败，退回 visionos：${err instanceof Error ? err.message : String(err)}`)
+  }
+  // visionos：明文直链
   const player = await c.mediaPlayer(id)
   const ps = player?.playabilityStatus ?? {}
   if (isBot(ps)) {
     c.ctx.log.warn('VISIONOS player 被人机验证拦下，改走 iOS + PO token 的兜底路径')
     return mediaByPot(c, id)
   }
-  const media = playableMedia(player, id, ps)
+  const media = playableMedia(player, id, ps, null)
   return { media, title: (player?.videoDetails?.title as string | undefined) ?? null }
 }
 
+/** player JS 的路径：ytcfg 的 PLAYER_JS_URL 优先（首页配置里有），没有时 playerjs 自己问 iframe_api。 */
+async function playerJsPath(c: YtClient): Promise<string | undefined> {
+  const cfg = (await c.config()) as { playerJsUrl?: string }
+  return cfg.playerJsUrl
+}
+
 /** 空格式列表 → UPSTREAM（年龄限制、会员专享等），与人机验证区分开。 */
-function playableMedia(player: any, id: string, ps: any) {
-  const media = norm.playMedia(player)
+function playableMedia(player: any, id: string, ps: any, playerCode: string | null, client: 'tv' | 'visionos' = 'visionos') {
+  const sig = new Map<string, string>()
+  const nSolved = new Map<string, string>()
+  if (playerCode) {
+    // 收集 tv_samsung 响应里的 s 挑战与 n 挑战，批量解算（yt-dlp 的 bulk solve 同款）
+    const sd = player?.streamingData ?? {}
+    const fmts: any[] = [...(sd.formats ?? []), ...(sd.adaptiveFormats ?? [])]
+    const sigChallenges = [...new Set(fmts.map((f) => /(?:^|&)s=([^&]+)/.exec(f.signatureCipher ?? '')?.[1] ?? null).filter((s): s is string => s != null))]
+    const nChallenges = [...new Set(fmts.map((f) => norm.formatN(f)).filter((s): s is string => s != null))]
+    const solved = playerJsTest.solve
+      ? playerJsTest.solve(playerCode, sigChallenges, nChallenges)
+      : playerjs.solveChallenges(playerCode, sigChallenges, nChallenges)
+    for (const [k, v] of solved.sig) sig.set(k, v)
+    for (const [k, v] of solved.n) nSolved.set(k, v)
+  }
+  const media = norm.playMedia(player, sig, nSolved, client)
   if (!media.length) {
     throw new CatbusError('UPSTREAM', `拿不到视频的媒体地址：${ps.reason ?? ps.status ?? id}`, {
       hint: '年龄限制、会员专享、仅儿童可见等视频不支持',
@@ -286,8 +328,13 @@ async function mediaByPot(c: YtClient, id: string) {
     throw new PotError(`PO Token 兜底失败：${err instanceof Error ? err.message : String(err)}`)
   }
   const ps = player?.playabilityStatus ?? {}
-  if (isBot(ps)) throw new PotError(`PO token 也被人机验证拦下：${ps.reason ?? ''}`)
-  const media = playableMedia(player, id, ps)
+  // iOS + pot 仍被人机验证拦：这是出口 IP 级的风控（pot 证明的是客户端来源，压不住 IP 信誉分，
+  // 实测 2026-11-11：重度下载同一天后，VISIONOS / iOS+pot / ANDROID+pot 全被拦，登录 WEB 会话能过但 formats 全是 SABR）。
+  // 能做的只有换出口 IP 或等信誉恢复，所以 hint 直接给这两条。
+  if (isBot(ps)) {
+    throw new PotError(`PO token 也被人机验证拦下：${ps.reason ?? ''}`)
+  }
+  const media = playableMedia(player, id, ps, null)
   // 兜底路径的直链要带 GVS PO token（URL 追加 `&pot=`），Google 偶尔已在部分 URL 上自带
   for (const m of media) {
     const raw = (m as any)[RAW]
@@ -307,11 +354,36 @@ export async function itemDownload(ctx: Ctx) {
   const c = yt(ctx)
   const id = videoId(ctx.args.item!)
   const { media, title } = await mediaOf(c, id)
-  return downloadMedia(ctx, c.http, id, media, { ...downloadOptions, title })
+  return downloadMedia(ctx, potRetryHttp(c, id), id, media, { ...downloadOptions, title })
+}
+
+/**
+ * GVS 下载段返回 403 且 URL 没有 pot 参数时：铸一个同绑视频 ID 的 PO token，URL 追加 `&pot=` 重试一次。
+ * VISIONOS 放行了、GVS 又收紧（风控窗口期）就轮到这一层兜底；铸不出来时维持原 403，不掩盖链路错误。
+ * mediaOf 的 pot 路径已经带了 token（potTs 注释），这里只补未带 token 的直链分段。
+ */
+function potRetryHttp(c: YtClient, id: string): Pick<YtClient['http'], 'request'> {
+  const request: YtClient['http']['request'] = async (req) => {
+    if (!req.url.includes('.googlevideo.com/') || /[?&]pot=/.test(req.url)) return c.http.request(req)
+    const res = await c.http.request(req)
+    if (res.status !== 403) return res
+    try {
+      const minter = await poMinter(c)
+      const pot = await minter.mintAsWebsafeString(id)
+      c.ctx.log.debug('GVS 下载 403，补 PO token 重试一次')
+      return await c.http.request({ ...req, url: `${req.url}&pot=${pot}` })
+    } catch (err) {
+      c.ctx.log.debug(`补 PO token 没成（${err instanceof Error ? err.message : String(err)}），维持原 403`)
+      return res
+    }
+  }
+  return { request } as Pick<YtClient['http'], 'request'>
 }
 
 const downloadOptions: DownloadOptions = {
-  headers: [['User-Agent', MEDIA_UA]],
+  // tv_samsung 的直链要用它自己的 UA 下载（其他 UA 带 Range 头会被 403，实测 2026-11-12）；
+  // visionos 用 Safari UA。来源客户端记在 RAW.client（playMedia 写入）。
+  headers: (m) => [['User-Agent', (m as any)[RAW]?.client === 'tv' ? TV_UA : MEDIA_UA]],
   ext: (m) => norm.formatExt((m as any)[RAW]?.mimeType),
   // googlevideo 拒绝整文件请求（403），不分段时还会被限速：按 10 MB 一段用 range 参数下载（与 yt-dlp 相同）
   chunked: (m) => {

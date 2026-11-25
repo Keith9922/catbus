@@ -67,7 +67,7 @@ catbus <platform> <resource> <action> [参数...] [选项...]
 | `item related <item>` | Item[]，分页 |
 | `item list` | Item[]，分页：自己发布的，带审核状态 |
 | `item media <item>` | Media[]：可播放 / 下载的地址 |
-| `item download <item> [--dir <目录>] [--overwrite] [--subdir none\|id\|title]` | File[]；文件名 `<platform>_<id>_<序号>.<ext>`；`--subdir` 时每条内容一个子目录 |
+| `item download <item> [--dir <目录>] [--overwrite] [--subdir none\|id\|title] [--meta] [--comments <N\|all>] [--replies <N\|all>] [--no-media]` | File[]；文件名 `<platform>_<id>_<序号>.<ext>`；`--subdir` 时每条内容一个子目录；`--meta` / `--comments` 另写 `<platform>_<id>.json`（ExportDoc：`{schema platform exported_at item comments[+replies] comments_truncated}`，File.type 为 `data`） |
 | `item like` / `unlike` / `collect` / `uncollect` / `repost` / `unrepost <item>` | `{id}` |
 | `item publish [发布选项]` | Item |
 | `item delete <item>` | `{id}`，危险操作 |
@@ -215,7 +215,7 @@ catbus <platform> <resource> <action> [参数...] [选项...]
 | Media | `id type url width height duration` |
 | Comment | `id item_id parent_id author:UserRef text media:Media[] created_at stats{likes replies}` |
 | Live | `id url title status host:UserRef cover stats{viewers}` |
-| Event | `type time user:UserRef text gift{name count}` |
+| Event | `type time user:UserRef text gift{name count} stats{viewers likes}` |
 | Conversation | `id peer:UserRef unread last_message updated_at` |
 | Message | `id conversation_id from:UserRef type text media:Media[] created_at` |
 

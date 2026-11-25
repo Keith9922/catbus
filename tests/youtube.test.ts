@@ -4,6 +4,7 @@ import { basename, dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RequestError } from 'wreq-js'
 import { CookieJar } from '../src/core/cookies.js'
+import { CatbusError } from '../src/core/errors.js'
 import { fakeResponse, type HttpResponse, mockSender, type PreparedRequest } from '../src/core/http.js'
 import { decode, int, str } from '../src/core/pb.js'
 import * as rand from '../src/core/rand.js'
@@ -12,6 +13,7 @@ import { browser, findChrome, type OpenOptions } from '../src/platforms/youtube/
 import { count, relTime } from '../src/platforms/youtube/web/normalize.js'
 import { cookieKey, syncCookies } from '../src/platforms/youtube/web/publish.js'
 import { potTest as youtubePotTest } from '../src/platforms/youtube/web/pot.js'
+import { playerJsTest } from '../src/platforms/youtube/web/playerjs.js'
 import type { Cookie } from '../src/core/schemas.js'
 import {
   commentAction,
@@ -28,7 +30,9 @@ import { cli, useTempHome } from './helpers.js'
 const fixture = (name: string) => readFileSync(join(import.meta.dirname, 'fixtures/youtube', name), 'utf8')
 const json = (name: string) => JSON.parse(fixture(`${name}.json`))
 
-const HOME = `<script>ytcfg.set({"INNERTUBE_CLIENT_VERSION":"2.20261023.01.00","VISITOR_DATA":"CgtGYWtlVmlzaXRvcg%3D%3D"});</script>`
+const HOME = `<script>ytcfg.set({"INNERTUBE_CLIENT_VERSION":"2.20261023.01.00","VISITOR_DATA":"CgtGYWtlVmlzaXRvcg%3D%3D","PLAYER_JS_URL":"/s/player/cafe0001/player_es6.vflset/en_US/base.js"});</script>`
+/** solver 的合成 player（tests/fixtures/youtube/mini-player.js）：s 反转 + 前 3 字符移到末尾，n 超过 8 字符时反转。 */
+const MINI_PLAYER = readFileSync(join(import.meta.dirname, 'fixtures/youtube/mini-player.js'), 'utf8')
 const SAPISID = 'fake-sapisid/AbCdEf'
 const COOKIE = `SID=fake-sid; HSID=fake-hsid; SSID=fake-ssid; APISID=fake-apisid; SAPISID=${SAPISID}; __Secure-3PAPISID=${SAPISID}; __Secure-3PSID=fake-3psid`
 const ME = 'UCaaaaaaaaaaaaaaaaaaaaaa'
@@ -64,7 +68,7 @@ function mockYt(routes: Record<string, Route>) {
     const path = (u.hostname.startsWith('studio.') ? 'studio:' : '') + (u.hostname.startsWith('suggestqueries') ? 'suggest' : u.pathname.replace(/^\/youtubei\/v1\//, ''))
     const body = typeof p.body === 'string' && p.body ? JSON.parse(p.body) : null
     calls.push({ path, body, headers: p.headers, cookies: p.cookies })
-    const route = path === '/' ? () => fakeResponse(HOME, { headers: [['content-type', 'text/html']] }) : routes[path]
+    const route = path === '/' ? () => fakeResponse(HOME, { headers: [['content-type', 'text/html']] }) : path === '/s/player/cafe0001/player_es6.vflset/en_US/base.js' ? () => fakeResponse(MINI_PLAYER, { headers: [['content-type', 'text/javascript']] }) : routes[path]
     if (!route) throw new Error(`未录制的请求：${path}`)
     const out = route(body, p)
     return out instanceof Response ? (out as unknown as HttpResponse) : fakeResponse(out as object, { headers: [['content-type', 'application/json']] })
@@ -93,8 +97,14 @@ describe('youtube 平台（web）', () => {
   let restoreClock: () => void
   beforeEach(() => {
     restoreClock = rand.deterministic({ now: new Date('2026-10-24T12:00:00Z').getTime() })
+    // 合成 player fixture（842B）远小于真实 player 的体积下限，测试里放开
+    playerJsTest.setMinCodeBytes(100)
   })
-  afterEach(() => restoreClock())
+  afterEach(() => {
+    restoreClock()
+    playerJsTest.setMinCodeBytes(100_000)
+    playerJsTest.solve = null
+  })
 
   it('注册表：web 端支持游客态，读取命令免登录，账号操作需要登录', () => {
     const web = youtube.endpoints.web as Exclude<typeof youtube.endpoints.web, 'planned'>
@@ -395,12 +405,13 @@ describe('youtube 平台（web）', () => {
       },
     }
 
-    it('item media：VISIONOS 客户端、不带 cookie；同高度优先 mp4，音频优先 m4a', async () => {
+    it('item media：visionos 明文直链、不带 cookie（tv_samsung 无 streamingData 时退回）；同高度优先 vp9/av01，音频优先 opus 之前先看码率', async () => {
       await login()
-      const r = await withYt({ player: () => vr }, async (calls) => {
+      const r = await withYt({ player: (body) => (body.context.client.clientName === 'TVHTML5' ? { playabilityStatus: { status: 'OK' }, streamingData: {} } : vr) }, async (calls) => {
         const r = await cli('youtube', 'item', 'media', 'dQw4w9WgXcQ')
-        const call = calls.find((c) => c.path === 'player')!
-        expect(call.body.context.client.clientName).toBe('VISIONOS')
+        const visionosCall = calls.filter((c) => c.path === 'player').map((c) => c.body.context.client.clientName)
+        expect(visionosCall).toEqual(['TVHTML5', 'VISIONOS'])
+        const call = calls.findLast((c) => c.path === 'player')!
         expect(call.headers).toContainEqual(['X-Youtube-Client-Name', '101'])
         expect(call.cookies).toEqual([])
         expect(call.headers.map(([k]) => k)).not.toContain('Authorization')
@@ -411,6 +422,30 @@ describe('youtube 平台（web）', () => {
         ['140', 'audio', null],
       ])
       expect(r.env.data[1].duration).toBeCloseTo(213.061)
+    })
+
+    it('item media：tv_samsung 首选，按 yt-dlp 的排序选最优（2160p vp9 优先于 1080p avc1；s 签名与 n 挑战解出）', async () => {
+      await login()
+      const nChallenge = 'anWWJuPXAFwEWFg8E4'
+      const tv = tvCipher(nChallenge)
+      const r = await withYt({ player: (body) => (body.context.client.clientName === 'TVHTML5' ? tv : { playabilityStatus: { status: 'OK' }, streamingData: {} }) }, async (calls) => {
+        const r = await cli('youtube', 'item', 'media', 'dQw4w9WgXcQ')
+        expect(calls.filter((c) => c.path === 'player').map((c) => c.body.context.client.clientName)).toEqual(['TVHTML5'])
+        const tvCall = calls.find((c) => c.path === 'player')!
+        expect(tvCall.headers).toContainEqual(['X-Youtube-Client-Name', '7'])
+        expect(tvCall.headers).toContainEqual(['X-Youtube-Client-Version', '5.20260707'])
+        // STS 来自 player JS（合成 fixture 里 signatureTimestamp: 20760）
+        expect(tvCall.body.playbackContext.contentPlaybackContext.signatureTimestamp).toBe(20760)
+        expect(tvCall.body.playbackContext.contentPlaybackContext.html5Preference).toBe('HTML5_PREF_WANTS')
+        expect(tvCall.body.playbackContext.contentPlaybackContext).not.toHaveProperty('visitorData')
+        return r
+      })
+      expect(r.env.data.map((m: any) => [m.id, m.type, m.height])).toEqual([
+        ['313', 'video', 2160],
+        ['140', 'audio', null],
+      ])
+      // s 签名（sp 指定的参数名）与 n 挑战都替换：mini fixture 的解算值（s 反转 + 前 3 移尾、n 反转）
+      expect(r.env.data[0].url).toBe(`https://media.example/videoplayback4k?itag=313&n=${[...nChallenge].reverse().join('')}&sig=gfedcbajih`)
     })
 
     it('item download：按 10 MB 一段用 range 参数分段下载，拼成一个文件（整文件 GET 会被 googlevideo 拒绝）', async () => {
@@ -432,11 +467,135 @@ describe('youtube 平台（web）', () => {
         return fakeResponse(`[${range}]`)
       }
       const dir = join(home.dir, 'dl')
-      const r = await withYt({ player: () => vr2, '/v': media, '/a': media }, () => cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir))
+      const r = await withYt({ player: (body) => (body.context.client.clientName === 'TVHTML5' ? { playabilityStatus: { status: 'OK' }, streamingData: {} } : vr2), '/v': media, '/a': media }, () => cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir))
       expect(r.env.ok).toBe(true)
       expect(ranges).toEqual([`/v:0-${10 * MB - 1}`, `/v:${10 * MB}-${20 * MB - 1}`, `/v:${20 * MB}-${25 * MB - 1}`, '/a:0-4'])
       expect(readFileSync(join(dir, 'youtube_dQw4w9WgXcQ_1.mp4'), 'utf8')).toBe(`[0-${10 * MB - 1}][${10 * MB}-${20 * MB - 1}][${20 * MB}-${25 * MB - 1}]`)
       expect(r.env.data.map((f: any) => basename(f.path))).toEqual(['youtube_dQw4w9WgXcQ_1.mp4', 'youtube_dQw4w9WgXcQ_2.m4a'])
+    })
+
+    it('item download：GVS 分段 403 时铸 PO token 补 `&pot=` 重试一次，拿回数据', async () => {
+      const MB = 1024 * 1024
+      const vr2 = {
+        playabilityStatus: { status: 'OK' },
+        streamingData: {
+          adaptiveFormats: [
+            { itag: 137, url: 'https://rr5---sn-np0.googlevideo.com/videoplayback?id=1', mimeType: 'video/mp4; codecs="avc1"', height: 1080, contentLength: String(25 * MB) },
+            { itag: 140, url: 'https://rr5---sn-np0.googlevideo.com/videoplayback?id=2', mimeType: 'audio/mp4; codecs="mp4a"', contentLength: '5' },
+          ],
+        },
+      }
+      const gvs: [hasPot: boolean, range: string][] = []
+      const video = (_: unknown, p: PreparedRequest) => {
+        const u = new URL(p.url)
+        const hasPot = u.searchParams.has('pot')
+        gvs.push([hasPot, u.searchParams.get('range')!])
+        // 风控窗口期：无 pot 的直链一律 403，带 pot 放行
+        return hasPot ? fakeResponse(`[${u.searchParams.get('range')}] pot=${u.searchParams.get('pot')}`) : fakeResponse('forbidden', { status: 403 })
+      }
+      const dir = join(home.dir, 'dl403')
+      await withYt({ player: () => vr2, '/videoplayback': video }, async () => {
+        youtubePotTest.fakeMinter = async (binding: string) => `pot-${binding}`
+        try {
+          const r = await cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir)
+          expect(r.env.ok).toBe(true)
+          // 每段都是先裸链 403、再带 pot 重试成功
+          const ranges = [`0-${10 * MB - 1}`, `${10 * MB}-${20 * MB - 1}`, `${20 * MB}-${25 * MB - 1}`, '0-4']
+          expect(gvs).toEqual(ranges.flatMap((range) => [[false, range], [true, range]]))
+          const text = readFileSync(join(dir, 'youtube_dQw4w9WgXcQ_1.mp4'), 'utf8')
+          expect(text.startsWith('[0')).toBe(true)
+          expect(text.endsWith('pot=pot-dQw4w9WgXcQ')).toBe(true)
+        } finally {
+          youtubePotTest.fakeMinter = null
+        }
+      })
+    })
+
+    it('item download：单段网络错误重试（重试前把半截数据截掉），429/5xx 同样重试，403 不重试', async () => {
+      const MB = 1024 * 1024
+      const vr2 = {
+        playabilityStatus: { status: 'OK' },
+        streamingData: {
+          adaptiveFormats: [
+            { itag: 137, url: 'https://media.example/v?id=1', mimeType: 'video/mp4; codecs="avc1"', height: 1080, contentLength: String(25 * MB) },
+            { itag: 140, url: 'https://media.example/a?id=2', mimeType: 'audio/mp4; codecs="mp4a"', contentLength: '5' },
+          ],
+        },
+      }
+      const hits: string[] = []
+      // body 与 range 等长（真实分段每段写满整个 range），内容用段序号填充以便校验
+      const chunkOf = (range: string, fill: number) => {
+        const [s, e] = range.split('-').map(Number)
+        return Buffer.alloc(e - s + 1, fill)
+      }
+      const flaky = (_: unknown, p: PreparedRequest) => {
+        const range = new URL(p.url).searchParams.get('range')!
+        hits.push(range)
+        // 第一段：先网络错误一次、再 500 一次，第三次放行；第二段直接 403（不应重试）
+        if (range === `0-${10 * MB - 1}`) {
+          if (hits.filter((h) => h === range).length === 1) throw new CatbusError('NETWORK', '网络错误：boom')
+          if (hits.filter((h) => h === range).length === 2) return fakeResponse('server error', { status: 500 })
+          return fakeResponse(chunkOf(range, 0x31))
+        }
+        if (range === `${10 * MB}-${20 * MB - 1}`) return fakeResponse('forbidden', { status: 403 })
+        return fakeResponse(chunkOf(range, 0x32))
+      }
+      const dir = join(home.dir, 'dl-flaky')
+      const r = await withYt({ player: () => vr2, '/v': flaky, '/a': () => fakeResponse(Buffer.alloc(5, 0x41)) }, () => cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir))
+      // 第一段重试两次后成功，第二段 403 失败整个命令报错
+      expect(r.code).toBe(7)
+      expect(r.env.error).toMatchObject({ code: 'UPSTREAM', detail: { status: 403 } })
+      expect(hits.filter((h) => h === `0-${10 * MB - 1}`)).toHaveLength(3)
+      expect(hits.filter((h) => h === `${10 * MB}-${20 * MB - 1}`)).toHaveLength(1)
+      // 失败时保留 .part（恰好落在段边界 = 第一段的数据），供下次续传
+      const part = readFileSync(join(dir, 'youtube_dQw4w9WgXcQ_1.mp4.part'))
+      expect(part.equals(Buffer.alloc(10 * MB, 0x31))).toBe(true)
+    })
+
+    it('item download：断点续传——上一次失败留下的 .part 接着用，已完成段不再请求', async () => {
+      const MB = 1024 * 1024
+      const vr2 = {
+        playabilityStatus: { status: 'OK' },
+        streamingData: {
+          adaptiveFormats: [
+            { itag: 137, url: 'https://media.example/v?id=1', mimeType: 'video/mp4; codecs="avc1"', height: 1080, contentLength: String(25 * MB) },
+            { itag: 140, url: 'https://media.example/a?id=2', mimeType: 'audio/mp4; codecs="mp4a"', contentLength: '5' },
+          ],
+        },
+      }
+      const gvs: string[] = []
+      let barrier = 0 // 0: 第二段一律 403；1: 全部放行
+      const chunkOf = (range: string, fill: number) => {
+        const [s, e] = range.split('-').map(Number)
+        return Buffer.alloc(e - s + 1, fill)
+      }
+      const media = (_: unknown, p: PreparedRequest) => {
+        const u = new URL(p.url)
+        const range = u.searchParams.get('range')!
+        gvs.push(`${u.pathname}:${range}`)
+        if (barrier === 0 && range === `${10 * MB}-${20 * MB - 1}`) return fakeResponse('forbidden', { status: 403 })
+        // 各段用不同填充值，最后按字节比对，确认 .part 的第一段没有被重复下载或错位
+        return fakeResponse(chunkOf(range, range.startsWith('0-') ? 0x01 : 0x02))
+      }
+      const dir = join(home.dir, 'dl-resume')
+      await withYt({ player: () => vr2, '/v': media, '/a': () => fakeResponse(Buffer.alloc(5, 0x41)) }, async () => {
+        const first = await cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir)
+        expect(first.code).toBe(7)
+        barrier = 1
+        const second = await cli('youtube', 'item', 'download', 'dQw4w9WgXcQ', '--dir', dir)
+        expect(second.env.ok).toBe(true)
+        // 第一次：第一段成功 + 第二段 403；第二次：只请求第二、三段（第一段来自 .part），音频单独的 route 不计数
+        expect(gvs).toEqual([
+          `/v:0-${10 * MB - 1}`,
+          `/v:${10 * MB}-${20 * MB - 1}`,
+          `/v:${10 * MB}-${20 * MB - 1}`,
+          `/v:${20 * MB}-${25 * MB - 1}`,
+        ])
+        const file = readFileSync(join(dir, 'youtube_dQw4w9WgXcQ_1.mp4'))
+        const want = Buffer.concat([Buffer.alloc(10 * MB, 0x01), Buffer.alloc(10 * MB, 0x02), Buffer.alloc(5 * MB, 0x02)])
+        expect(file.equals(want)).toBe(true)
+        expect(readFileSync(join(dir, 'youtube_dQw4w9WgXcQ_2.m4a')).equals(Buffer.alloc(5, 0x41))).toBe(true)
+      })
     })
 
     it('item media：人机验证时回落到 iOS + PO token（token 同时放行 player 与 GVS 直链）', async () => {
@@ -466,8 +625,8 @@ describe('youtube 平台（web）', () => {
               ['137', 'video', 'https://media.example/137&pot=pot-dQw4w9WgXcQ'],
               ['140', 'audio', 'https://media.example/140?x=1&pot=pot-dQw4w9WgXcQ'],
             ])
-            // VISIONOS 先被拦（客户端 101），再走 iOS 分轨（客户端 5）
-            expect(calls.filter((c) => c.path === 'player').map((c) => c.body.context.client.clientName)).toEqual(['VISIONOS', 'IOS'])
+            // tv_samsung（客户端 7）和 VISIONOS（客户端 101）都被拦，再走 iOS 分轨（客户端 5）
+            expect(calls.filter((c) => c.path === 'player').map((c) => c.body.context.client.clientName)).toEqual(['TVHTML5', 'VISIONOS', 'IOS'])
             const iosCall = calls.findLast((c) => c.path === 'player')!
             expect(iosCall.headers).toContainEqual(['X-Youtube-Client-Name', '5'])
             expect(iosCall.body.serviceIntegrityDimensions).toEqual({ poToken: 'pot-dQw4w9WgXcQ' })
@@ -494,6 +653,64 @@ describe('youtube 平台（web）', () => {
       )
       expect(r.code).toBe(5)
       expect(r.env.error).toMatchObject({ code: 'RISK_CONTROL', detail: { kind: 'captcha' } })
+    })
+
+    /** tv_samsung 的 player 响应：地址全是 signatureCipher（s 挑战）+ URL 带 n 挑战（真实结构，2026-11-12 实测）。 */
+    const tvCipher = (nChallenge: string) => ({
+      playabilityStatus: { status: 'OK' },
+      videoDetails: { videoId: 'dQw4w9WgXcQ', title: 'Test', lengthSeconds: '213' },
+      streamingData: {
+        formats: [
+          // muxed 360p：signatureCipher，解签后可直接下载
+          {
+            itag: 18,
+            mimeType: 'video/mp4; codecs="avc1.42001E, mp4a.40.2"',
+            signatureCipher: `url=https://media.example/videoplayback?itag=18%26n=${nChallenge}%26fvip=1&s=abcdefghij&sp=sig`,
+            height: 360,
+            contentLength: '1000',
+          },
+        ],
+        adaptiveFormats: [
+          // 2160p vp9（tv_samsung 独有的高格式上限）
+          {
+            itag: 313,
+            mimeType: 'video/webm; codecs="vp9"',
+            signatureCipher: `url=https://media.example/videoplayback4k?itag=313%26n=${nChallenge}&s=abcdefghij&sp=sig`,
+            height: 2160,
+            width: 3840,
+            contentLength: '90000',
+          },
+          { itag: 140, url: `https://media.example/audio?id=1&n=${nChallenge}`, mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 130000, contentLength: '30' },
+        ],
+      },
+    })
+
+    it('item media：tv_samsung 回 UNPLAYABLE（如 STS 失效）时退回 visionos 的明文直链', async () => {
+      const visionos = {
+        playabilityStatus: { status: 'OK' },
+        videoDetails: { videoId: 'dQw4w9WgXcQ', title: 'Test', lengthSeconds: '213' },
+        streamingData: {
+          formats: [{ itag: 18, url: 'https://media.example/18', mimeType: 'video/mp4', height: 360 }],
+          adaptiveFormats: [
+            { itag: 137, url: 'https://media.example/137', mimeType: 'video/mp4; codecs="avc1"', width: 1920, height: 1080 },
+            { itag: 140, url: 'https://media.example/140', mimeType: 'audio/mp4; codecs="mp4a.40.2"', bitrate: 130000 },
+          ],
+        },
+      }
+      const r = await withYt(
+        {
+          player: (body) => (body.context.client.clientName === 'TVHTML5' ? { playabilityStatus: { status: 'UNPLAYABLE', reason: 'The page needs to be reloaded.' } } : visionos),
+        },
+        async (calls) => {
+          const r = await cli('youtube', 'item', 'media', 'dQw4w9WgXcQ')
+          expect(r.code).toBe(0)
+          expect(calls.filter((c) => c.path === 'player').map((c) => c.body.context.client.clientName)).toEqual(['TVHTML5', 'VISIONOS'])
+          expect(r.env.data.map((m: any) => [m.id, m.type, m.height])).toEqual([
+            ['137', 'video', 1080],
+            ['140', 'audio', null],
+          ])
+        },
+      )
     })
   })
 

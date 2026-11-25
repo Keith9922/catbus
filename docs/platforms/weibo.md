@@ -8,7 +8,7 @@
 | 上游仓库 | [cv-cat/WeiboApis](https://github.com/cv-cat/WeiboApis) |
 | 移植基线 | master 上的 [`757582c`](https://github.com/cv-cat/WeiboApis/commit/757582c41831cda3723c41b4544b93d4f47fe179)，记录在 [`src/platforms/weibo/UPSTREAM`](../../src/platforms/weibo/UPSTREAM) |
 | 端 | web ✓ · app ○ 规划中 · pc ○ 规划中 |
-| 命令（web） | 已实现 12 条（✓ 10 · ◐ 2），规划中 ○ 55 条 |
+| 命令（web） | 已实现 13 条（✓ 10 · ◐ 3），规划中 ○ 54 条 |
 
 上游 WeiboApis 的能力不多（用户、微博详情、评论、搜索、发布），所以微博的大部分命令还是规划中。命令表由注册表生成，与 `catbus platforms weibo` 一致；选项以 `catbus weibo <resource> <action> --help` 为准。通用的命令语法、输出结构见 [AGENTS.md 第 4 节](../../AGENTS.md#4-命令规范)。
 
@@ -52,7 +52,7 @@ catbus weibo auth login --cookie @weibo-cookie.txt
 | 命令 | 状态 | 说明 |
 |---|---|---|
 | `item get` | ✓ | 微博详情。 |
-| `item search` | ◐ | 搜索微博。只能取第一页（m.weibo.cn 的访客从第二页起要求登录）。 |
+| `item search` | ✓ | 搜索微博。主站 s.weibo.com 综合搜索，登录态下可翻页（cursor 即页码）。 |
 | `item publish` | ✓ | 发布微博。`--image`（最多 15 张）和 `--video` 不能同时用。取值：`--visibility` public / private / friends / fans。不支持 `--title`、`--cover`、`--tag`、`--mention`、`--poi`、`--category`、`--schedule`、`--price`。私有选项 `--poi-name`。 |
 | `item list`、`item media`、`item download`、`item like`、`item unlike`、`item collect`、`item uncollect`、`item repost`、`item unrepost`、`item delete` | ○ | 规划中 |
 
@@ -69,6 +69,13 @@ catbus weibo auth login --cookie @weibo-cookie.txt
 |---|---|---|
 | `media upload` | ✓ | 上传媒体。 |
 
+### keyword
+
+| 命令 | 状态 | 说明 |
+|---|---|---|
+| `keyword hot` | ◐ | 热搜词：网页端热搜榜，按榜单顺序，`heat` 为热度值。非上游：请求按网页端补的（`weibo.com/ajax/side/hotSearch`），去掉广告位，不含置顶词。 |
+| `keyword suggest` | ○ | 规划中 |
+
 ### 整组规划中
 
 下面这些 resource 在本平台还没有已实现的命令，执行时都返回 `NOT_IMPLEMENTED`（退出码 4）。
@@ -77,7 +84,6 @@ catbus weibo auth login --cookie @weibo-cookie.txt
 |---|---|
 | `feed` | `list` |
 | `live` | `get` `list` `search` `categories` `listen` `history` `send` `like` `rank` `gifts` `products` `media` `replays` `start` `stop` |
-| `keyword` | `suggest` `hot` |
 | `notice` | `list` `count` |
 | `msg` | `list` `history` `send` `listen` `read` `revoke` `delete` |
 | `folder` | `list` `items` |
@@ -117,7 +123,7 @@ catbus weibo user items "https://weibo.com/u/<uid>" --limit 50 -o jsonl
 catbus weibo item get "<weibo_url>"
 catbus weibo comment list "<weibo_url>" --all -o jsonl > comments.jsonl
 
-# 搜索（只有第一页）
+# 搜索（登录态下自动翻页取满 --limit）
 catbus weibo item search 咖啡
 
 # 发一条仅自己可见的微博，带图和地点标签
@@ -126,7 +132,7 @@ catbus weibo item publish --text "今天的咖啡" --image latte.jpg --poi-name 
 
 ## 已知限制
 
-- **搜索只能取第一页**：m.weibo.cn 的访客从第二页起要求登录，`--limit` / `--all` 也只会返回第一页。
+- **搜索需要登录**：搜索走主站 s.weibo.com，未登录（或登录态失效）报 AUTH_REQUIRED，触发验证时报 RISK_CONTROL。m.weibo.cn 的容器接口访客从第二页起就是登录墙，不再用于搜索（保留为回退，同样只能取第一页）。
 - **只有一级评论**：`comment list` 不含楼中楼；`comment replies` 规划中。
 - **删不掉微博**：`item delete` 上游没有（○），发出去的微博要在网页或 App 里手动删除。测试发布请用 `--visibility private`。
 - **PC 端详情不移植**：上游的 `WeiboApis.getWorkInfo` 取的是 weibo.com 页面里的 `$CONFIG`，现在的 weibo.com 是单页应用，那里没有正文；catbus 的 `item get` 走 m.weibo.cn。

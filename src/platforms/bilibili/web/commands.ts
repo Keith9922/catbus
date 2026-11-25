@@ -5,13 +5,13 @@ import { CatbusError } from '../../../core/errors.js'
 import { downloadMedia, readMedia } from '../../../core/files.js'
 import { imageSize } from '../../../core/image.js'
 import { parseJson } from '../../../core/http.js'
-import { cookieCredential, finishLogin, freshCredential, loginContext, poll, readPassword, showQrcode, smsLogin } from '../../../core/login.js'
+import { cookieCredential, finishLogin, freshCredential, loginContext, poll, qrcodeScanned, readPassword, showQrcode, smsLogin } from '../../../core/login.js'
 import * as n from '../../../core/normalize.js'
 import * as pb from '../../../core/pb.js'
 import { jsonLoads } from '../../../core/py.js'
 import * as rand from '../../../core/rand.js'
 import type { HandlerContext } from '../../../core/registry.js'
-import type { AuthStatus, Credential, Danmaku, Item, Media, Subtitle } from '../../../core/schemas.js'
+import { type AuthStatus, type Credential, type Danmaku, type Item, type Media, type Series, type Subtitle, withRaw } from '../../../core/schemas.js'
 import { openSocket, reconnecting } from '../../../core/stream.js'
 import { paged, scope } from '../../../core/toolkit.js'
 import * as api from './api.js'
@@ -21,7 +21,7 @@ import * as geetest from './geetest.js'
 import * as norm from './normalize.js'
 import { COOKIE_DOMAIN, PROFILE } from './profile.js'
 import { DYNAMIC_REPLY_HINT, READ_DYNAMIC_REPLY_HINT, type ReadReplyTarget, resolveDynamic, resolveFolder, resolveItem, resolveReadReplyTarget, resolveReplyTarget, resolveRoom, resolveUser } from './resolve.js'
-import { encryptPassword } from './sign.js'
+import { bv2av, encryptPassword } from './sign.js'
 import { uploadVideo } from './upos.js'
 
 type Ctx = HandlerContext
@@ -79,7 +79,7 @@ export async function authLogin(ctx: Ctx) {
       const code = r.data?.code
       if (code === 0) return r.data.refresh_token ?? ''
       if (code === 86038) throw new CatbusError('AUTH_REQUIRED', '二维码已失效', { hint: '重新执行 catbus bilibili auth login' })
-      if (code === 86090 && last !== code) ctx.log.info('已扫码，请在手机上确认')
+      if (code === 86090 && last !== code) qrcodeScanned(ctx)
       last = code ?? null
       return undefined
     })
@@ -269,17 +269,22 @@ export async function itemList(ctx: Ctx) {
   return paged(list, p + 1, p * Number(d.page?.ps ?? 20) < Number(d.page?.count ?? 0))
 }
 
-/** 播放地址：DASH 取最高画质的视频轨和音频轨；老稿件是 durl 整段。 */
-async function playMedia(b: Bili, bvid: string, cid: string | number): Promise<Media[]> {
+/**
+ * 播放地址：DASH 取最高画质的视频轨和音频轨；`all` 时给出全部轨道（--all-tracks：视频按画质、码率从高到低，
+ * 音频含杜比全景声，按码率从高到低）。老稿件是 durl 整段。
+ */
+async function playMedia(b: Bili, bvid: string, cid: string | number, all = false): Promise<Media[]> {
   const d = await api.playUrl(b, bvid, cid)
   if (d.dash) {
     const duration = n.seconds(d.dash.duration)
-    const video = [...(d.dash.video ?? [])].sort((a: any, c: any) => c.id - a.id || c.bandwidth - a.bandwidth)[0]
-    const audio = [...(d.dash.audio ?? []), ...(d.dash.flac?.audio ? [d.dash.flac.audio] : [])].sort((a: any, c: any) => c.bandwidth - a.bandwidth)[0]
-    const out: Media[] = []
-    if (video) out.push(n.media({ id: String(video.id), type: 'video', url: video.baseUrl ?? video.base_url, width: video.width, height: video.height, duration }, video))
-    if (audio) out.push(n.media({ id: String(audio.id), type: 'audio', url: audio.baseUrl ?? audio.base_url, duration }, audio))
-    return out
+    const videos = [...(d.dash.video ?? [])].sort((a: any, c: any) => c.id - a.id || c.bandwidth - a.bandwidth)
+    const audios = [...(d.dash.audio ?? []), ...(d.dash.flac?.audio ? [d.dash.flac.audio] : []), ...(all ? (d.dash.dolby?.audio ?? []) : [])].sort(
+      (a: any, c: any) => c.bandwidth - a.bandwidth,
+    )
+    const video = (v: any) => n.media({ id: String(v.id), type: 'video', url: v.baseUrl ?? v.base_url, width: v.width, height: v.height, duration }, v)
+    const audio = (a: any) => n.media({ id: String(a.id), type: 'audio', url: a.baseUrl ?? a.base_url, duration }, a)
+    if (all) return [...videos.map(video), ...audios.map(audio)]
+    return [...videos.slice(0, 1).map(video), ...audios.slice(0, 1).map(audio)]
   }
   return (d.durl ?? []).map((x: any) => n.media({ id: String(x.order), type: 'video', url: x.url, duration: n.seconds(x.length / 1000) }, x))
 }
@@ -288,7 +293,7 @@ export async function itemMedia(ctx: Ctx) {
   const b = await bili(ctx)
   const { bvid } = await resolveItem(b, ctx.args.item!)
   const info = await api.videoInfo(b, bvid)
-  return playMedia(b, bvid, info.cid)
+  return playMedia(b, bvid, info.cid, ctx.options.allTracks === true)
 }
 
 export async function itemDownload(ctx: Ctx) {
@@ -387,6 +392,7 @@ export async function itemPublish(ctx: Ctx) {
     dtime,
     noReprint: o.allowReprint ? 0 : 1,
   })
+  if (o.series) await joinSeason(b, String(o.series), { aid: Number(d.aid) || Number(bv2av(d.bvid)), cid: Number(video.biz_id), title: String(o.title), bvid: d.bvid })
   return n.item({ id: d.bvid, kind: 'video', url: norm.videoUrl(d.bvid), title: o.title, text: o.text ?? null, cover: cover || null, status: 'reviewing' }, d)
 }
 
@@ -422,6 +428,133 @@ export async function itemEdit(ctx: Ctx) {
     onlySelf: o.visibility == null ? Number(A.is_only_self ?? 0) : o.visibility === 'private' ? 1 : 0,
   })
   return n.item({ id: d.bvid || bvid, kind: 'video', url: norm.videoUrl(d.bvid || bvid), title: o.title ?? A.title, text: o.text ?? A.desc ?? null, cover: cover || null, status: 'reviewing' }, d)
+}
+
+// ================================================================ 合集（平台扩展）
+
+const SEASON_PAGE_SIZE = 50
+const SEASON_MAX_PAGES = 20
+
+/** 合集参数：合集 ID，或空间页合集链接里的 sid。 */
+function seasonIdOf(input: string): string {
+  const s = input.trim()
+  const m = /[?&]sid=(\d+)/.exec(s) ?? /^(\d+)$/.exec(s)
+  if (!m) throw new CatbusError('USAGE', `无法识别的合集：${input}`, { hint: '传合集 ID，或空间页合集链接（带 sid=）' })
+  return m[1]!
+}
+
+interface SeasonRef {
+  id: number
+  /** 合集里第一个小节；合集没有小节时为 null。 */
+  sectionId: number | null
+  title: string
+}
+
+/** 按 ID 找合集与它的小节（season/switch 需要小节 ID）。 */
+async function findSeason(b: Bili, input: string): Promise<SeasonRef> {
+  const want = seasonIdOf(input)
+  for (let pn = 1; pn <= SEASON_MAX_PAGES; pn++) {
+    const d: any = await api.seasons(b, pn, SEASON_PAGE_SIZE)
+    const hit = (d?.seasons ?? []).find((x: any) => String(x?.season?.id ?? '') === want)
+    if (hit) {
+      const section = (hit.sections?.sections ?? [])[0]
+      return { id: Number(want), sectionId: section?.id != null ? Number(section.id) : null, title: String(hit.season?.title ?? '') }
+    }
+    if ((d?.seasons ?? []).length < SEASON_PAGE_SIZE) break
+  }
+  throw new CatbusError('USAGE', `找不到合集 ${input}`, { hint: 'catbus bilibili series list 看自己有哪些合集' })
+}
+
+/**
+ * 把一份稿件挂进合集。发布时顺手加合集：稿件已经发出去了，失败不能当成发布失败，
+ * 报 UPSTREAM 并带上 bvid，hint 让用 `series add` 重试。
+ */
+async function joinSeason(b: Bili, seasonInput: string, target: { aid: number; cid: number; title: string; bvid: string }): Promise<void> {
+  const season = await findSeason(b, seasonInput)
+  if (season.sectionId == null) throw new CatbusError('USAGE', `合集「${season.title}」没有小节，无法加入`, { hint: '先在网页端给合集建一个小节' })
+  try {
+    await api.addSeasonEpisodes(b, season.sectionId, [{ aid: target.aid, cid: target.cid, title: target.title }])
+  } catch (err) {
+    const reason = err instanceof CatbusError ? err.message : err instanceof Error ? err.message : String(err)
+    throw new CatbusError('UPSTREAM', `稿件 ${target.bvid} 已发布，但加入合集「${season.title}」失败：${reason}`, {
+      hint: `catbus bilibili series add ${season.id} ${target.bvid} 重试`,
+      detail: { bvid: target.bvid, season_id: season.id },
+    })
+  }
+}
+
+/** 我的合集列表（创作中心「合集管理」）；只能列自己的，分页沿用 --limit / --cursor / --all。 */
+export async function seriesList(ctx: Ctx) {
+  const b = await bili(ctx)
+  b.requireLogin()
+  if (ctx.args.user && ctx.args.user !== 'me') {
+    throw new CatbusError('UNSUPPORTED', 'B 站只能列自己创建的合集', { hint: 'catbus bilibili series list' })
+  }
+  const pn = page(ctx)
+  const d: any = await api.seasons(b, pn, SEASON_PAGE_SIZE)
+  const mid = b.mid || String(ctx.credential.user?.id ?? '')
+  const list: Series[] = (d?.seasons ?? []).map((x: any) => {
+    const s = x.season ?? {}
+    // season.ep_num 常是 0，集数在「小节」的 epCount 里
+    const count = Number(s.ep_num ?? 0) || (x.sections?.sections ?? []).reduce((n: number, sec: any) => n + Number(sec.epCount ?? 0), 0) || (x.part_episodes ?? []).length
+    return {
+      id: String(s.id ?? ''),
+      name: String(s.title ?? ''),
+      count,
+      url: mid ? `https://space.bilibili.com/${mid}/channel/collectiondetail?sid=${s.id}` : null,
+    }
+  })
+  const total = Number(d?.total ?? list.length)
+  const hasMore = pn * SEASON_PAGE_SIZE < total
+  return paged(list, hasMore ? String(pn + 1) : undefined, hasMore)
+}
+
+/** 把一条已发布的稿件加进合集（挂到合集的第一个小节）。 */
+export async function seriesAdd(ctx: Ctx) {
+  const b = await bili(ctx)
+  b.requireLogin()
+  const season = await findSeason(b, ctx.args.series!)
+  if (season.sectionId == null) throw new CatbusError('USAGE', `合集「${season.title}」没有小节，无法加入`, { hint: '先在网页端给合集建一个小节' })
+  const { aid, bvid } = await resolveItem(b, ctx.args.item!)
+  const vids: any = await api.archiveVideos(b, Number(aid))
+  const cid = Number(vids?.videos?.[0]?.cid)
+  if (!cid) throw new CatbusError('UPSTREAM', `读不到稿件 ${bvid} 的 cid`, { detail: { bvid } })
+  await api.addSeasonEpisodes(b, season.sectionId, [{ aid: Number(aid), cid, title: String(vids?.archive?.title ?? bvid) }])
+  return { id: bvid }
+}
+
+export async function seriesSort(ctx: Ctx) {
+  const b = await bili(ctx)
+  b.requireLogin()
+  const season = await findSeason(b, ctx.args.series!)
+  if (season.sectionId == null) throw new CatbusError('USAGE', `合集「${season.title}」没有小节，无法排序`, { hint: '先在网页端给合集建一个小节' })
+  const sec: any = await api.seasonSection(b, Number(season.sectionId ?? season.id))
+  const section = sec?.section ?? {}
+  const episodes: any[] = sec?.episodes ?? []
+  if (episodes.length < 2) return { id: String(season.id), moved: 0 }
+
+  // 取每个稿件的发布时间（/x/web-interface/view，逐条，17 条以内可接受）
+  const pub = new Map<string, number>()
+  for (const e of episodes) {
+    try {
+      const v: any = await b.get('https://api.bilibili.com/x/web-interface/view', { query: [['bvid', String(e.bvid)]] })
+      pub.set(String(e.bvid), Number(v?.pubdate ?? 0))
+    } catch {
+      pub.set(String(e.bvid), 0)
+    }
+  }
+
+  const order = String(ctx.args.order ?? 'asc')
+  const sorted = [...episodes].sort((x, y) => {
+    const dx = pub.get(String(x.bvid)) ?? 0
+    const dy = pub.get(String(y.bvid)) ?? 0
+    return order === 'desc' ? dy - dx : dx - dy
+  })
+  const sorts = sorted.map((e, i) => ({ id: Number(e.id), sort: i + 1 }))
+  const changed = sorted.some((e, i) => Number(e.order) !== i + 1)
+  if (!changed) return { id: String(season.id), moved: 0 }
+  await api.editSectionSorts(b, { id: Number(section.id), seasonId: Number(section.seasonId ?? season.id), title: String(section.title ?? '正片') }, sorts)
+  return { id: String(season.id), moved: sorts.length }
 }
 
 /** 换视频：先上传，拿到 filename 与 cid（biz_id）。 */
@@ -615,15 +748,36 @@ export const commentUnpin = (ctx: Ctx) => pinComment(ctx, false)
 
 // ================================================================ 弹幕（扩展）
 
-/** 解 DmSegMobileReply：elems=1，每条 id=1 progress=2 ctime=8 content=7 idStr=12。 */
+/**
+ * 解 DmSegMobileReply：elems=1，每条 id=1 progress=2 mode=3 fontsize=4 color=5 midHash=6 content=7 ctime=8
+ * weight=9 pool=11 idStr=12 attr=13。原始字段挂给 --raw（弹幕的类型、颜色、字号）。
+ */
 export function decodeDanmaku(buf: Uint8Array, bvid: string): Danmaku[] {
-  return pb.messages(pb.decode(buf), 1).map((e) => ({
-    id: pb.str(e, 12) ?? pb.int64(e, 1) ?? '',
-    item_id: bvid,
-    offset: (pb.int(e, 2) ?? 0) / 1000,
-    text: pb.str(e, 7) ?? '',
-    created_at: n.time(pb.int(e, 8)),
-  }))
+  return pb.messages(pb.decode(buf), 1).map((e) =>
+    withRaw(
+      {
+        id: pb.str(e, 12) ?? pb.int64(e, 1) ?? '',
+        item_id: bvid,
+        offset: (pb.int(e, 2) ?? 0) / 1000,
+        text: pb.str(e, 7) ?? '',
+        created_at: n.time(pb.int(e, 8)),
+      },
+      {
+        id: pb.int64(e, 1),
+        progress: pb.int(e, 2),
+        mode: pb.int(e, 3),
+        fontsize: pb.int(e, 4),
+        color: pb.int(e, 5),
+        midHash: pb.str(e, 6),
+        content: pb.str(e, 7),
+        ctime: pb.int(e, 8),
+        weight: pb.int(e, 9),
+        pool: pb.int(e, 11),
+        idStr: pb.str(e, 12),
+        attr: pb.int(e, 13),
+      },
+    ),
+  )
 }
 
 export async function danmakuList(ctx: Ctx) {
@@ -718,6 +872,17 @@ export async function folderItems(ctx: Ctx) {
   const p = page(ctx)
   const d = await api.favResources(b, folder, p)
   return paged((d?.medias ?? []).filter((m: any) => m.bvid).map(norm.favVideo), p + 1, Boolean(d?.has_more))
+}
+
+// ================================================================ keyword
+
+/** 热搜榜（非上游，见 api.searchSquare）：网页端搜索框下的「bilibili 热搜」，按热度排好序；只取 list，不含偶尔出现的置顶词（top_list，没有热度）。 */
+export async function keywordHot(ctx: Ctx) {
+  const b = await bili(ctx)
+  const d = await api.searchSquare(b)
+  return (d?.trending?.list ?? [])
+    .map((x: any) => n.keyword({ text: String(x?.keyword || x?.show_name || ''), heat: n.count(x?.heat_score) }, x))
+    .filter((k: { text: string }) => k.text)
 }
 
 // ================================================================ media
@@ -855,6 +1020,47 @@ export async function liveCategories(ctx: Ctx) {
     n.category({ id: n.id(p.id), name: p.name }, p),
     ...(p.list ?? []).map((c: any) => n.category({ id: n.id(c.id), name: c.name, parent_id: n.id(c.parent_id ?? p.id) }, c)),
   ])
+}
+
+/** live categories 的 id → 分区页的 (parent_area_id, area_id)：父分区取整个分区（子分区为 0），子分区带上所属父分区。 */
+async function liveArea(b: Bili, category: string): Promise<[string, string]> {
+  const parents: any[] = (await api.areaList(b)).data ?? []
+  for (const p of parents) {
+    if (String(p.id) === category) return [category, '0']
+    const c = (p.list ?? []).find((x: any) => String(x.id) === category)
+    if (c) return [String(c.parent_id ?? p.id), category]
+  }
+  throw new CatbusError('USAGE', `没有 id 为 ${category} 的直播分区`, { hint: 'catbus bilibili live categories' })
+}
+
+// 同一条命令翻页时复用分区解析和 w_webid（分区页 HTML 每条命令只取一次）；缓存随 args 存活，不写入凭证。
+const liveAreaSessions = new WeakMap<Ctx['args'], Promise<{ area: [string, string]; webid: string }>>()
+
+function liveAreaSession(b: Bili, ctx: Ctx, category: string) {
+  let s = liveAreaSessions.get(ctx.args)
+  if (!s) {
+    s = (async () => {
+      const area = await liveArea(b, category)
+      return { area, webid: await api.liveAccessId(b, ...area) }
+    })()
+    liveAreaSessions.set(ctx.args, s)
+  }
+  return s
+}
+
+export async function liveList(ctx: Ctx) {
+  const b = await bili(ctx)
+  const p = page(ctx)
+  const category = ctx.options.category as string | undefined
+  let d: any
+  if (category) {
+    const { area, webid } = await liveAreaSession(b, ctx, category)
+    d = await api.liveAreaList(b, area[0], area[1], p, webid)
+  } else {
+    d = await api.liveIndexList(b, p)
+  }
+  const list = (d.list ?? []).map(norm.listLive)
+  return paged(list, p + 1, list.length > 0 && Number(d.has_more ?? 0) === 1)
 }
 
 export async function liveHistory(ctx: Ctx) {

@@ -1,6 +1,6 @@
 import { CatbusError } from '../../../core/errors.js'
 import { parseJson } from '../../../core/http.js'
-import { jsonDumps, jsonLoads, type Pairs } from '../../../core/py.js'
+import { jsonDumps, jsonLoads, quote, type Pairs } from '../../../core/py.js'
 import * as rand from '../../../core/rand.js'
 import type { Weibo, WeiboJson } from './client.js'
 import {
@@ -12,6 +12,7 @@ import {
   postImageHeaders,
   postVideoHeaders,
   searchHeaders,
+  siteSearchHeaders,
   uploadImageHeaders,
   uploadVideoHeaders,
   videoCheckHeaders,
@@ -87,6 +88,36 @@ export function comments(w: Weibo, uid: string, mid: string, maxId?: string) {
   return w.json('com', { url: `${WEB}/ajax/statuses/buildComments`, headers: commonHeaders(w.xsrf), query: params })
 }
 
+// ================================================================ feed（WeiboApis.getHotTimeline / getFriendsTimeline）
+
+/**
+ * 推荐流（hottimeline）：网页「发现」页的推荐，与「热门」页是同一条流。
+ * group_id / containerid 固定为热门流 102803；不带它们时 ok=0。
+ * 翻页：把上一页响应里的 since_id（对象 {ul_sid, ul_hid, since_id}）原样回传成 since_id 参数。
+ */
+export function feedRecommend(w: Weibo, sinceId: string | null) {
+  const params: Pairs = [['since_id', sinceId ?? '0'], ['refresh', '0'], ['group_id', '102803'], ['containerid', '102803'], ['extparam', 'discover|new_feed'], ['max_id', '0'], ['count', '20']]
+  return w.json('com', { url: `${WEB}/ajax/feed/hottimeline`, headers: commonHeaders(w.xsrf), query: params })
+}
+
+/** 关注流（friendstimeline）：关注的人的最新微博；since_id=0 从头开始，翻页带上一页的 max_id。 */
+export function feedFollowing(w: Weibo, maxId: string | null) {
+  const params: Pairs = [['list_id', ''], ['refresh', '4'], ['since_id', '0'], ['count', '20']]
+  if (maxId) params.push(['max_id', maxId])
+  return w.json('com', { url: `${WEB}/ajax/feed/friendstimeline`, headers: commonHeaders(w.xsrf), query: params })
+}
+
+// ================================================================ keyword（非上游）
+
+/**
+ * 非上游：热搜榜（`keyword hot`）。上游没有这个接口，按网页端「热搜」榜补的
+ * （weibo-pro-next 的 RANK_TAB_GROUP_MAP.search），没有对拍。
+ * data.realtime 是榜单（夹着广告位，is_ad=1），data.hotgov 是置顶词。
+ */
+export function hotSearch(w: Weibo) {
+  return w.json('com', { url: `${WEB}/ajax/side/hotSearch`, headers: commonHeaders(w.xsrf) })
+}
+
 // ================================================================ WeiboMobileApis（m.weibo.cn）
 
 const RENDER_RE = /var \$render_data = \[([\s\S]*?)\]\[0\] \|\| \{\};\n {2}var __wb_performance_data=\{v:"v8",m:"mainsite",pwa:1,sw:0\};/
@@ -108,7 +139,7 @@ export async function mobileDetail(w: Weibo, id: string): Promise<any> {
   }
 }
 
-/** searchSome：综合搜索（容器 100103type=1）。 */
+/** searchSome：综合搜索（容器 100103type=1）。访客从第二页起要求登录，只能取第一页；保留给回退与对拍。 */
 export function mobileSearch(w: Weibo, query: string, page: number | string = 1) {
   return w.json('cn', {
     url: `${MOBILE}/api/container/getIndex`,
@@ -118,6 +149,22 @@ export function mobileSearch(w: Weibo, query: string, page: number | string = 1)
       ['page_type', 'searchall'],
       ['page', String(page)],
     ],
+  })
+}
+
+// ================================================================ 主站搜索（非上游）
+
+/**
+ * 非上游：主站综合搜索页（s.weibo.com/weibo?q=…&page=N，网页端「综合」搜索的 HTML）。
+ * 上游的 searchSome（m.weibo.cn 容器接口）只能取第一页：访客从第二页起就是登录墙，换成登录会话也
+ * 返回 ok=-100（2026-11 实测）。主站搜索页在 .weibo.com 的登录 cookie 下可以直接用 page 翻页，
+ * 所以 item search 改走这里（commands.itemSearch），mobileSearch 保留为回退。
+ * 没有对拍，用真机响应裁剪的 fixture 命令测试覆盖（tests/fixtures/weibo/site_search_*.html）。
+ */
+export function siteSearch(w: Weibo, query: string, page: number | string = 1) {
+  return w.html('com', {
+    url: `https://s.weibo.com/weibo?q=${quote(query, '')}&page=${String(page)}`,
+    headers: siteSearchHeaders(),
   })
 }
 

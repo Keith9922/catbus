@@ -1,7 +1,7 @@
 import { CatbusError } from '../../../core/errors.js'
 import { imageSize } from '../../../core/image.js'
 import { downloadMedia, type LocalMedia, readMedia } from '../../../core/files.js'
-import { cookieCredential, finishLogin, freshCredential, interactive, loginContext, poll, prompt, showQrcode, smsLogin } from '../../../core/login.js'
+import { cookieCredential, finishLogin, freshCredential, interactive, loginContext, poll, prompt, qrcodeScanned, showQrcode, smsLogin } from '../../../core/login.js'
 import * as n from '../../../core/normalize.js'
 import { jsonLoads } from '../../../core/py.js'
 import * as rand from '../../../core/rand.js'
@@ -127,7 +127,7 @@ async function loginQrcode(ctx: Ctx) {
       const s = await login.qrcodeStatus(p, qr.qrId, qr.code)
       if (s === 2) return true
       if (s === 3) throw new CatbusError('AUTH_REQUIRED', '二维码已过期', { hint: '重新执行 catbus xhs auth login' })
-      if (s === 1 && last !== 1) ctx.log.info('已扫码，请在手机上确认')
+      if (s === 1 && last !== 1) qrcodeScanned(ctx)
       last = s
       return undefined
     })
@@ -390,7 +390,7 @@ async function loginCreator(ctx: Ctx, method: 'qrcode' | 'sms') {
         const s = await l.qrcodeStatus(qr!.id)
         if (s === 1) return true
         if (s === 0 || s === 4 || s == null) throw new CatbusError('AUTH_REQUIRED', s === 4 ? '二维码已过期' : '二维码状态异常', { hint: '重新执行 catbus xhs auth login --scope creator' })
-        if (s === 3 && last !== 3) ctx.log.info('已扫码，请在手机上确认')
+        if (s === 3 && last !== 3) qrcodeScanned(ctx)
         last = s
         return undefined
       },
@@ -570,7 +570,16 @@ export async function itemPublish(ctx: Ctx) {
   if (o.image?.length && o.video) throw new CatbusError('USAGE', '--image 和 --video 只能用一个')
   // 上游用 opencv 截视频首帧当封面；catbus 不带视频解码器，封面要自己给
   if (o.video && !o.cover) throw new CatbusError('USAGE', '小红书视频发布需要 --cover（catbus 不解码视频，截不了首帧）', { hint: 'catbus xhs item publish --video a.mp4 --cover a.jpg --title <标题>' })
+  // 定时发布的 business_binds 是另一套结构（scheduledBinds），没有声明字段；静默丢掉声明比报错更糟，直接拒绝
+  if (o.schedule && (o.original || o.aiGenerated)) {
+    throw new CatbusError('USAGE', '小红书定时发布不支持原创声明和 AI 合成内容声明（--original、--ai-generated）', { hint: '去掉 --schedule 立即发布，或去掉声明选项' })
+  }
   return creator(ctx, async (c) => {
+    const creatorId = c.state.cookies['x-user-id-creator.xiaohongshu.com'] ?? ''
+    // 原创声明的 bizId 是创作者 ID；没有时发出去的声明无效，提前报错
+    if (o.original && !creatorId) {
+      throw new CatbusError('AUTH_REQUIRED', '创作者中心登录态里缺少 x-user-id-creator.xiaohongshu.com，无法做原创声明', { hint: 'catbus xhs auth login --scope creator' })
+    }
     const postTime = o.schedule ? Date.parse(o.schedule) : null
     let postLoc: Record<string, unknown> | null = null
     if (o.poi != null || o.poiName != null) {
@@ -586,7 +595,16 @@ export async function itemPublish(ctx: Ctx) {
       }
       postLoc = { name: loc.name, subname: loc.full_address, poi_id: loc.poi_id, poi_type: loc.poi_type }
     }
-    const note = { title: o.title ?? '', desc: o.text ?? '', postTime, postLoc, privacy: o.visibility === 'private' ? 1 : 0 }
+    const note = {
+      title: o.title ?? '',
+      desc: o.text ?? '',
+      postTime,
+      postLoc,
+      privacy: o.visibility === 'private' ? 1 : 0,
+      original: !!o.original,
+      ai: !!o.aiGenerated,
+      creatorId,
+    }
     let data: Record<string, any>
     if (o.video) {
       const video = await readMedia(c.http, o.video)
@@ -636,7 +654,6 @@ export async function commentReplies(ctx: Ctx) {
 // ================================================================ feed
 
 export async function feedList(ctx: Ctx) {
-  if (ctx.options.kind === 'following') throw new CatbusError('NOT_IMPLEMENTED', 'xhs 的 feed list --kind following 尚未实现', { detail: { upstream: 'none' } })
   return run(ctx, async (p) => {
     // cursor：note_index:cursor_score:频道
     let [index, score, category] = [0, '', (ctx.options.category as string | undefined) ?? 'homefeed_recommend']

@@ -94,7 +94,9 @@ catbus bilibili item delete BV1xx411c7mD --dry-run
 | Price | `amount currency`（`amount` 以元等主单位计） |
 | Comment | `id item_id parent_id author:UserRef text media:Media[] created_at stats{likes replies}` |
 | Live | `id url title status host:UserRef cover stats{viewers}` |
-| Event | `type time user:UserRef text gift{name count}\|null` |
+| Event | `type time user:UserRef text gift{name count}\|null stats{viewers likes}\|null` |
+
+`stats` 是直播间的实时数据（在线人数、累计点赞），只有带这类数据的消息才有，其余为 null；只更新这些数字的消息 `type` 为 `other`。
 | Conversation | `id peer:UserRef unread last_message updated_at` |
 | Message | `id conversation_id from:UserRef type text media:Media[] created_at` |
 | Notice | `id type user:UserRef target{id url}\|null text created_at` |
@@ -114,6 +116,21 @@ catbus bilibili item delete BV1xx411c7mD --dry-run
 - 所有对象都带 `id` 和 `url`，可以直接作为下一条命令的参数。
 
 写操作的返回：成对动作（`like/unlike` 等）、`delete`、`live send` 等返回 `{id}`（目标对象的 id）；`item publish` 返回 Item；`comment add` 返回 Comment；`msg send` 返回 Message；`item download` 返回 File[]。
+
+### item download 导出的帖子信息
+
+`item download` 加 `--meta` 时，在媒体文件旁边多写一个 `<platform>_<id>.json`；加 `--comments <N|all>` 时连同评论一起导出（`--replies <N|all>` 再带上每条评论的回复），加 `--no-media` 时只写这个文件、不下载媒体。返回的 File[] 里这个文件的 `type` 为 `data`。
+
+```jsonc
+{
+  "schema": 1,
+  "platform": "xhs",
+  "exported_at": "2026-11-12T12:00:00+08:00",
+  "item": { /* Item，与 item get 的输出相同 */ },
+  "comments": [ /* Comment，再加 replies: Comment[] */ ],
+  "comments_truncated": false   // 取评论中途遇到风控而停下时为 true，已经取到的照样写出
+}
+```
 
 ## 分页与游标
 
