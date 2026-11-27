@@ -3,7 +3,24 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { toCatbusError } from '../core/errors.js'
 import type { Platform } from '../core/registry.js'
 import { copyText, openUrl } from './clipboard.js'
-import { appendComments, appendReplies, canReply, type CommentRow, type CommentsState, EMPTY, fetchComments, fetchReplies, replyCount, rows as rowsOf, type Source, updateThread } from './comments.js'
+import {
+  appendComments,
+  appendReplies,
+  canReply,
+  type CommentRow,
+  COMMENT_FILTER_MIN,
+  type CommentsState,
+  type CommentSort,
+  EMPTY,
+  fetchComments,
+  fetchReplies,
+  filterThreads,
+  replyCount,
+  rows as rowsOf,
+  type Source,
+  updateThread,
+} from './comments.js'
+import { edit, initial, splitAtCursor, type TextState } from './input.js'
 import { type LogBuffer, bufferLogger } from './logs.js'
 import { quote } from './model.js'
 import { Frame } from './screen.js'
@@ -13,6 +30,10 @@ import { clip, count, when, width } from './text.js'
 import { Row, T, useGlyphs } from './ui.js'
 
 // 评论页（AGENTS 4.13）：一条内容的评论，Enter 展开楼中楼。翻到底自动取下一页；回复只在 Enter 时取。
+// 评论区筛选（/ 搜索、s 排序）只作用于已加载的顶层评论，不发请求、不改翻页；楼中楼不参与筛选。
+
+const SORT_LABEL: Record<CommentSort, string> = { default: '默认', hot: '最热', new: '最新' }
+const SORT_CYCLE: CommentSort[] = ['default', 'hot', 'new']
 
 type Obj = Record<string, any>
 const author = (c: Obj): string => String(c.author?.name ?? c.author?.id ?? '')
@@ -45,6 +66,10 @@ export function CommentsScreen({
   const [sel, setSel] = useState(0)
   const [top, setTop] = useState(0)
   const [note, setNote] = useState<string | null>(null)
+  const [sort, setSort] = useState<CommentSort>('default')
+  // committed：当前生效的查词；editing 非 null 时正在输入（Enter 提交进 committed，Esc 放弃并恢复 committed）
+  const [committed, setCommitted] = useState('')
+  const [editing, setEditing] = useState<TextState | null>(null)
   const alive = useRef(true)
   const controller = useRef(new AbortController())
   const source = useMemo<Source>(() => {
@@ -89,17 +114,21 @@ export function CommentsScreen({
       (err) => alive.current && setState((x) => updateThread(x, i, (y) => ({ ...y, loading: false, error: toCatbusError(err) }))),
     )
   }
-  const list = rowsOf(state)
-  // Pane 占 rows - 2 行，去掉标题线和底边；再留 6 行给选中这条的全文（空一行 + 作者 + 最多 4 行）
-  const visible = Math.max(3, rows - 2 - 2 - 6)
+  // 评论区筛选（AGENTS 4.13）：达到门槛才生效，没查词、没排序时就是原始加载顺序，复位就是 list = rowsOf(state)
+  const filtering = state.threads.length >= COMMENT_FILTER_MIN
+  const order = filtering && (committed || sort !== 'default') ? filterThreads(state, committed, sort) : undefined
+  const list = rowsOf(state, order)
+  const filtered = order != null
+  // Pane 占 rows - 2 行，去掉标题线和底边；筛选时多一行「找到 M 条」；再留 6 行给选中这条的全文（空一行 + 作者 + 最多 4 行）
+  const visible = Math.max(3, rows - 2 - 2 - 6 - (filtered ? 1 : 0))
   const at = Math.min(sel, Math.max(0, list.length - 1))
   const picked: CommentRow | undefined = list[at]
   const pickedComment = picked?.type === 'comment' ? state.threads[picked.thread]?.comment : picked?.type === 'reply' ? state.threads[picked.thread]?.replies?.[picked.index] : undefined
-  // 翻到底（打开时列表只有“更多”一行，也算到底）：还有下一页就取
+  // 翻到底（打开时列表只有“更多”一行，也算到底）：还有下一页就取。筛选时列表是子集，位置和“到底”无关，不自动翻页
   useEffect(() => {
-    if (list.length && at >= list.length - 3) more(state)
+    if (!filtered && list.length && at >= list.length - 3) more(state)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [at, list.length])
+  }, [at, list.length, filtered])
 
   const move = (n: number) => {
     const next = Math.max(0, Math.min(list.length - 1, n))
@@ -120,12 +149,40 @@ export function CommentsScreen({
   }
 
   useInput((input, key) => {
+    if (editing != null) {
+      // 搜索框占用输入：Enter 提交（空字符串也提交，等于清空搜索但保留排序），Esc 放弃，不提交
+      if (key.return) {
+        setCommitted(editing.value)
+        setEditing(null)
+        return
+      }
+      if (key.escape) {
+        setEditing(null)
+        return
+      }
+      const next = edit(editing, input, key)
+      if (next) setEditing(next)
+      return
+    }
     if (key.escape || input === 'q') return onExit()
     if (key.upArrow || input === 'k') return move(at - 1)
     if (key.downArrow || input === 'j') return move(at + 1)
     if (key.pageDown) return move(at + visible)
     if (key.pageUp) return move(at - visible)
     if (key.return) return enter()
+    if (input === '/' && filtering) {
+      setEditing(initial(committed))
+      return
+    }
+    if (input === 's' && filtering) {
+      setSort((v) => SORT_CYCLE[(SORT_CYCLE.indexOf(v) + 1) % SORT_CYCLE.length]!)
+      return
+    }
+    if (input === 'c' && filtered) {
+      setCommitted('')
+      setSort('default')
+      return
+    }
     if (input === 'y' && pickedComment) {
       const text = oneLine(pickedComment.text)
       void copyText(text).then((m) => setNote(m ? '已复制评论' : '没能写入剪贴板'))
@@ -159,6 +216,11 @@ export function CommentsScreen({
 
   const full = pickedComment ? wrap(oneLine(pickedComment.text), inner - 4, width).slice(0, 4) : []
   const head = `评论 ${g.sep} ${platform.name} ${g.sep} ${clip(title, Math.max(8, cols - 40), g.more)} · ${state.threads.length}${state.hasMore ? '+' : ''}`
+  const [searchBefore, searchAt, searchAfter] = editing ? splitAtCursor(editing) : ['', '', '']
+  const keys: [string, string][] = [['↑↓', '选择'], ['Enter', '展开回复']]
+  if (filtering) keys.push(['/', '搜索'], ['s', `排序：${SORT_LABEL[sort]}`])
+  if (filtered) keys.push(['c', '清除筛选'])
+  keys.push(['y', '复制评论'], ['o', '打开内容'], ['Esc', editing != null ? '取消输入' : '返回'])
   return (
     <Frame
       cols={cols}
@@ -166,8 +228,20 @@ export function CommentsScreen({
       title={head}
       info={`等价命令  catbus ${platform.id} comment list ${quote(itemRef, process.platform === 'win32' ? 'win' : 'posix')}`}
       note={note}
-      keys={[['↑↓', '选择'], ['Enter', '展开回复'], ['y', '复制评论'], ['o', '打开内容'], ['Esc', '返回']]}
+      keys={keys}
     >
+      {editing != null ? (
+        <Box paddingLeft={2} paddingTop={1}>
+          <T c="dim">{'搜索  '}</T>
+          <T c="accent">{searchBefore}</T>
+          <T bg="accent">{searchAt === '' ? ' ' : searchAt}</T>
+          <T c="accent">{searchAfter}</T>
+        </Box>
+      ) : filtered ? (
+        <Box paddingLeft={2} paddingTop={1}>
+          <T c="dim">{`在已加载的 ${state.threads.length} 条里找到 ${order!.length} 条${committed ? `（含「${committed}」）` : ''}，排序：${SORT_LABEL[sort]}`}</T>
+        </Box>
+      ) : null}
       {list.length === 0 ? (
         <Box paddingLeft={2} paddingTop={1}>
           <T c="dim">还没有评论。</T>

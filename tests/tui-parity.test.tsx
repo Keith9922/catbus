@@ -171,11 +171,14 @@ describe('tui：和网页界面对齐的功能', () => {
     expect(text()).toContain('演示甲的第一条')
   })
 
-  it('下载：空格选几条，d 加入下载，D 看进度；文件写到下载目录', async () => {
+  it('下载：空格选几条，d 打开选项面板，默认选项下再按 d 开始下载，D 看进度；文件写到下载目录', async () => {
     await open()
     await search('猫')
     await s!.press(' ', ' ')
     expect(text()).toContain('已选 2')
+    await s!.press('d')
+    await s!.waitForText('下载选项')
+    expect(text()).toContain('2 条')
     await s!.press('d')
     await s!.waitForText('已加入下载 2 条')
     await s!.press('D')
@@ -184,8 +187,51 @@ describe('tui：和网页界面对齐的功能', () => {
     expect(existsSync(join(dir, 'demoa_demoa-1.mp4'))).toBe(true)
     expect(existsSync(join(dir, 'demoa_demoa-2.mp4'))).toBe(true)
     expect(seen.filter((x) => x.key === 'item download').map((x) => x.options.dir)).toEqual([dir, dir])
+    // 默认选项：没有多余的 meta/comments/replies/noMedia
+    for (const x of seen.filter((x) => x.key === 'item download')) {
+      expect(x.options).not.toHaveProperty('meta')
+      expect(x.options).not.toHaveProperty('comments')
+    }
     await s!.press(KEYS.esc)
     expect(text()).toContain('演示甲的第一条')
+  })
+
+  it('下载选项：勾选“只要信息”、填“导出评论”后开始，传给 item download；Esc 取消不会加入队列', async () => {
+    await open()
+    await search('猫')
+    await s!.press(' ')
+    await s!.press('d')
+    await s!.waitForText('下载选项')
+    await s!.press(KEYS.esc) // 先验证取消
+    expect(text()).toContain('演示甲的第一条')
+    expect(seen.some((x) => x.key === 'item download')).toBe(false)
+    await s!.press('d')
+    await s!.waitForText('下载选项')
+    await s!.press(KEYS.down, KEYS.down) // 到“导出评论”（第 3 行：只要信息、写信息、导出评论）
+    await s!.press(KEYS.enter)
+    await s!.type('20')
+    await s!.press(KEYS.enter)
+    await s!.press('d')
+    await s!.waitForText('已加入下载 1 条')
+    await s!.press('D')
+    await s!.waitForText('完成 1')
+    const job = seen.find((x) => x.key === 'item download')!
+    // comments 隐含 meta
+    expect(job.options).toMatchObject({ meta: true, comments: '20' })
+  })
+
+  it('下载选项：评论条数不是正整数或 all 时报错，不会开始下载', async () => {
+    await open()
+    await search('猫')
+    await s!.press('d')
+    await s!.waitForText('下载选项')
+    await s!.press(KEYS.down, KEYS.down)
+    await s!.press(KEYS.enter)
+    await s!.type('不是数字')
+    await s!.press(KEYS.enter)
+    await s!.press('d')
+    await s!.waitForText('只能是正整数或 all')
+    expect(seen.some((x) => x.key === 'item download')).toBe(false)
   })
 
   it('多选在翻页后还在：滚到末尾附近自动取下一页，已选的不清掉', async () => {

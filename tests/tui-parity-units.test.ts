@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CatbusError } from '../src/core/errors.js'
 import { definePlatform, type HandlerContext } from '../src/core/registry.js'
 import { interleave, searchAll, searchable } from '../src/tui/aggregate.js'
-import { appendComments, appendReplies, EMPTY, rows, updateThread } from '../src/tui/comments.js'
+import { appendComments, appendReplies, EMPTY, filterThreads, rows, updateThread } from '../src/tui/comments.js'
 import { DownloadQueue, titleOf } from '../src/tui/downloads.js'
 import { mediaOf } from '../src/tui/media.js'
 import { primaryCommand, runnableCommand } from '../src/tui/model.js'
@@ -62,6 +62,73 @@ const settle = async (q: DownloadQueue) => {
 
 describe('下载队列', () => {
   const opts = (dir = '/tmp/x') => ({ log, dir: () => dir, account: () => undefined, gap: () => 0 })
+
+  it('一批的选项原样交给每一条的 item download（外加 dir）', async () => {
+    const seenGiven: Record<string, unknown>[] = []
+    const p = definePlatform({
+      id: 'opt',
+      name: 'opt',
+      aliases: [],
+      item: '帖子',
+      endpoints: {
+        web: {
+          login: { methods: [] },
+          guest: true,
+          commands: {
+            'item download': {
+              upstream: 'full',
+              auth: 'optional',
+              handler: async () => async (ctx: HandlerContext) => {
+                seenGiven.push({ ...ctx.options })
+                return []
+              },
+            },
+          },
+        },
+        app: 'planned',
+        pc: 'planned',
+      },
+    })
+    const q = new DownloadQueue(opts('/tmp/out'))
+    q.add(p, runnableCommand(p, 'item download')!, [{ id: 'a' }, { id: 'b' }], { meta: true, comments: '20', noMedia: true })
+    await settle(q)
+    expect(seenGiven).toHaveLength(2)
+    for (const g of seenGiven) expect(g).toMatchObject({ meta: true, comments: '20', noMedia: true, dir: '/tmp/out' })
+  })
+
+  it('没有选项时不带多余的键', async () => {
+    const seenGiven: Record<string, unknown>[] = []
+    const p = definePlatform({
+      id: 'noopt',
+      name: 'noopt',
+      aliases: [],
+      item: '帖子',
+      endpoints: {
+        web: {
+          login: { methods: [] },
+          guest: true,
+          commands: {
+            'item download': {
+              upstream: 'full',
+              auth: 'optional',
+              handler: async () => async (ctx: HandlerContext) => {
+                seenGiven.push({ ...ctx.options })
+                return []
+              },
+            },
+          },
+        },
+        app: 'planned',
+        pc: 'planned',
+      },
+    })
+    const q = new DownloadQueue(opts('/tmp/out'))
+    q.add(p, runnableCommand(p, 'item download')!, [{ id: 'a' }])
+    await settle(q)
+    expect(seenGiven[0]).not.toHaveProperty('meta')
+    expect(seenGiven[0]).not.toHaveProperty('comments')
+    expect(seenGiven[0]).not.toHaveProperty('noMedia')
+  })
 
   it('一条一条地下，结果记下文件；没有 id 也没有 url 的跳过', async () => {
     const { p, calls } = platform('dl', (ref) => [{ path: `/tmp/x/${ref}.mp4`, type: 'video', url: null, size: 2048 }])
@@ -198,6 +265,52 @@ describe('评论的行', () => {
     // 先后回来的两页不会互相覆盖：都是在当时的状态上接
     expect(s.threads.map((t) => t.comment.id)).toEqual(['c1', 'c2', 'c3'])
     expect(s.threads[0]!.replies?.map((r) => r.id)).toEqual(['r1', 'r2'])
+  })
+})
+
+describe('评论区筛选（AGENTS 4.13）：只作用于已加载的顶层评论', () => {
+  const thread = (id: string, text: string, author: string, likes: number, createdAt: string | null) => ({
+    id,
+    text,
+    stats: { likes, replies: 0 },
+    author: { name: author },
+    created_at: createdAt,
+  })
+  const base = appendComments(EMPTY, {
+    items: [
+      thread('c1', '这只猫真可爱', '小明', 5, '2026-01-01T00:00:00+08:00'),
+      thread('c2', '沙发', '阿狗', 20, '2026-01-03T00:00:00+08:00'),
+      thread('c3', '求链接', '小明', 1, null),
+      thread('c4', '哈哈哈', '路人', 20, '2026-01-02T00:00:00+08:00'),
+    ],
+    cursor: null,
+    hasMore: false,
+  })
+
+  it('不给排序时按加载顺序；最热按点赞降序；最新按时间降序，没有时间的排最后', () => {
+    expect(filterThreads(base, '', 'default')).toEqual([0, 1, 2, 3])
+    // 点赞并列（c2=c4=20）保持原有相对顺序（Array.sort 稳定）
+    expect(filterThreads(base, '', 'hot')).toEqual([1, 3, 0, 2])
+    expect(filterThreads(base, '', 'new')).toEqual([1, 3, 0, 2])
+  })
+
+  it('搜索：正文或作者昵称子串匹配，不分大小写；和排序一起用', () => {
+    expect(filterThreads(base, '小明', 'default')).toEqual([0, 2])
+    expect(filterThreads(base, '猫', 'default')).toEqual([0])
+    expect(filterThreads(base, '阿狗', 'hot')).toEqual([1])
+    expect(filterThreads(base, '不存在的词', 'default')).toEqual([])
+  })
+
+  it('rows() 按 order 只显示命中的评论；楼中楼跟着它所属的评论走（展开时），不参与筛选；order 存在时不附加“更多”行', () => {
+    const withReplies = updateThread(
+      appendReplies(base, 0, { items: [{ id: 'r1', text: '同意', stats: { likes: 0, replies: 0 } }], cursor: null, hasMore: false }),
+      0,
+      (t) => ({ ...t, open: true }),
+    )
+    const order = filterThreads(withReplies, '小明', 'default')
+    const idOf = (r: ReturnType<typeof rows>[number]) =>
+      r.type === 'comment' ? withReplies.threads[r.thread]!.comment.id : r.type === 'reply' ? withReplies.threads[r.thread]!.replies![r.index]!.id : r.type
+    expect(rows(withReplies, order).map(idOf)).toEqual(['c1', 'r1', 'c3'])
   })
 })
 

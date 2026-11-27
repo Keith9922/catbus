@@ -26,6 +26,8 @@ export interface Job {
   state: JobState
   files: DownloadedFile[]
   error: CatbusError | null
+  /** item download 的选项（不含 dir、-a，由队列另外带上）：meta、comments、replies、noMedia 等。 */
+  options: Record<string, unknown>
 }
 
 export interface QueueOptions {
@@ -85,14 +87,14 @@ export class DownloadQueue {
     for (const fn of this.subs) fn()
   }
 
-  /** 加入一批，返回加入的条数。没有 id 也没有 url 的条目没法下载，跳过。 */
-  add(platform: Platform, command: Command, items: unknown[]): number {
+  /** 加入一批，返回加入的条数。没有 id 也没有 url 的条目没法下载，跳过。options 是 item download 的选项（meta、comments、replies、noMedia 等），不含 dir、-a。 */
+  add(platform: Platform, command: Command, items: unknown[], options: Record<string, unknown> = {}): number {
     let added = 0
     for (const item of items) {
       if (!isObj(item)) continue
       const ref = refOf(item, platform)
       if (!ref) continue
-      this.jobs.push({ id: ++this.seq, platform, command, ref, title: titleOf(item), state: 'waiting', files: [], error: null })
+      this.jobs.push({ id: ++this.seq, platform, command, ref, title: titleOf(item), state: 'waiting', files: [], error: null, options })
       added++
     }
     if (added) {
@@ -172,7 +174,7 @@ export class DownloadQueue {
     job.state = 'running'
     this.emit()
     try {
-      const req: RunRequest = { platform: job.platform, command: job.command, words: [job.ref], given: { dir: this.opts.dir() }, log: this.opts.log }
+      const req: RunRequest = { platform: job.platform, command: job.command, words: [job.ref], given: { ...job.options, dir: this.opts.dir() }, log: this.opts.log }
       const account = this.opts.account(job.platform)
       if (account) req.account = account
       const r = await runCommand(req)

@@ -61,17 +61,57 @@ export function replyCount(t: Thread): number {
   return t.replies?.length ?? 0
 }
 
-/** 列表里依次有哪些行：评论，展开的回复，回复的“更多”，最后是评论的“更多”。 */
-export function rows(s: CommentsState): CommentRow[] {
+/** 列表里依次有哪些行：评论，展开的回复，回复的“更多”，最后是评论的“更多”。order 不给时按加载顺序；
+ * 给了就按它给的顺序和子集显示顶层评论（评论区筛选，AGENTS 4.13）。楼中楼不参与筛选，跟着它所属的评论走。 */
+export function rows(s: CommentsState, order?: readonly number[]): CommentRow[] {
   const out: CommentRow[] = []
-  s.threads.forEach((t, i) => {
+  const indices = order ?? s.threads.map((_, i) => i)
+  for (const i of indices) {
+    const t = s.threads[i]
+    if (!t) continue
     out.push({ type: 'comment', thread: i })
-    if (!t.open) return
+    if (!t.open) continue
     t.replies?.forEach((_, j) => out.push({ type: 'reply', thread: i, index: j }))
     if (t.loading || t.error || t.hasMore) out.push({ type: 'replies', thread: i })
-  })
-  if (s.loading || s.error || s.hasMore) out.push({ type: 'more' })
+  }
+  if (!order && (s.loading || s.error || s.hasMore)) out.push({ type: 'more' })
   return out
+}
+
+export type CommentSort = 'default' | 'hot' | 'new'
+/** 评论区筛选起作用的门槛（AGENTS 4.13）：已加载的评论少于这个数就不显示搜索和排序。 */
+export const COMMENT_FILTER_MIN = 5
+
+/**
+ * 评论区筛选（AGENTS 4.13）：只作用于已加载的顶层评论，不发请求、不改翻页。搜索在正文和作者昵称里做
+ * 子串匹配（不分大小写）；最热按点赞数降序，最新按发布时间降序，取不到的排在最后；没有排序时保持加载顺序。
+ * 返回匹配到的 thread 下标，交给 rows() 当 order。
+ */
+export function filterThreads(s: CommentsState, query: string, sort: CommentSort): number[] {
+  const q = query.trim().toLowerCase()
+  let indices = s.threads.map((_, i) => i)
+  if (q) {
+    indices = indices.filter((i) => {
+      const c = s.threads[i]!.comment
+      return String(c.text ?? '').toLowerCase().includes(q) || String(c.author?.name ?? '').toLowerCase().includes(q)
+    })
+  }
+  if (sort === 'hot') {
+    indices = [...indices].sort((a, b) => likesOf(s.threads[b]!.comment) - likesOf(s.threads[a]!.comment))
+  } else if (sort === 'new') {
+    indices = [...indices].sort((a, b) => timeOf(s.threads[b]!.comment) - timeOf(s.threads[a]!.comment))
+  }
+  return indices
+}
+
+function likesOf(c: Obj): number {
+  const n = c.stats?.likes
+  return typeof n === 'number' ? n : -1
+}
+
+function timeOf(c: Obj): number {
+  const t = typeof c.created_at === 'string' ? Date.parse(c.created_at) : NaN
+  return Number.isFinite(t) ? t : -Infinity
 }
 
 export interface Source {

@@ -20,7 +20,7 @@ import { PaletteView } from './Palette.js'
 import { ResultKeys, ResultsView, resultsVisible } from './Results.js'
 import { type RunRequest, runCommand } from './run.js'
 import {
-  clamp, commandVisible, filterPalette, originOf, layoutFor, type PaletteEntry, paletteText, type Phase, type Results, rowsOf, scrollTo, toItems,
+  clamp, commandVisible, filterPalette, originOf, verifyUrlOf, layoutFor, type PaletteEntry, paletteText, type Phase, type Results, rowsOf, scrollTo, toItems,
 } from './state.js'
 import { kindOf, linkOf, rawOf } from './summary.js'
 import { clip, padEnd } from './text.js'
@@ -31,6 +31,7 @@ import { AggregateScreen } from './AggregateScreen.js'
 import { canComment } from './comments.js'
 import { CommentsScreen } from './CommentsScreen.js'
 import { DownloadQueue } from './downloads.js'
+import { DownloadOptionsScreen } from './DownloadOptionsScreen.js'
 import { DownloadsScreen } from './DownloadsScreen.js'
 import { MediaScreen } from './MediaScreen.js'
 import { SettingsScreen } from './SettingsScreen.js'
@@ -59,10 +60,10 @@ function mainGroup(p: Platform): string[] {
   return pick ? [pick.resource] : []
 }
 
-type Mode = 'browse' | 'palette' | 'help' | 'json' | 'detail' | 'next' | 'accounts' | 'login' | 'listen' | 'downloads' | 'comments' | 'media' | 'settings' | 'aggregate'
+type Mode = 'browse' | 'palette' | 'help' | 'json' | 'detail' | 'next' | 'accounts' | 'login' | 'listen' | 'downloads' | 'download-options' | 'comments' | 'media' | 'settings' | 'aggregate'
 
 /** 自己处理按键、自己画整屏的页面：主界面的 useInput 让路，免得同一次按键处理两遍。 */
-const SCREENS: ReadonlySet<Mode> = new Set(['listen', 'downloads', 'comments', 'media', 'settings', 'aggregate'])
+const SCREENS: ReadonlySet<Mode> = new Set(['listen', 'downloads', 'download-options', 'comments', 'media', 'settings', 'aggregate'])
 
 function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platforms: Platform[]; light: boolean; toggleTheme: () => void }) {
   const { exit } = useApp()
@@ -267,7 +268,7 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
       } catch (err) {
         if (controller.signal.aborted) return
         const e: CatbusError = toCatbusError(err)
-        setPhase({ type: 'error', code: e.code, message: e.message, hint: e.hint, exit: e.exitCode })
+        setPhase({ type: 'error', code: e.code, message: e.message, hint: e.hint, exit: e.exitCode, verifyUrl: verifyUrlOf(e.detail) })
       }
     },
     [formValues, logs],
@@ -414,7 +415,10 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
     return { item: phase.results.items[phase.selected], platform: originOf(phase.results, phase.selected).platform }
   }
 
-  /** 下载：有选中的就下载选中的，否则下载当前这一条。按平台分组，各用各的 item download。 */
+  /** 下载前选的这一批：按平台分组的条目。 */
+  const [downloadBatch, setDownloadBatch] = useState<Map<string, { platform: Platform; items: unknown[] }> | null>(null)
+
+  /** 按 d：有选中的就准备下载选中的，否则准备当前这一条。按平台分组，各用各的 item download；这一步不下载，只是打开选项面板。 */
   const startDownload = () => {
     if (phase.type !== 'results') return
     const r = phase.results
@@ -426,16 +430,26 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
       grp.items.push(r.items[i])
       groups.set(p.id, grp)
     }
+    const runnable = new Map([...groups].filter(([, grp]) => runnableCommand(grp.platform, 'item download')))
+    const cannot = [...groups.values()].filter((grp) => !runnableCommand(grp.platform, 'item download')).map((grp) => grp.platform.name)
+    if (!runnable.size) return setNote(cannot.length ? `${cannot.join('、')}不能在界面里下载` : '这一项没法下载')
+    setDownloadBatch(runnable)
+    setMode('download-options')
+  }
+
+  /** 选项面板按 d：真正把这一批加入队列。 */
+  const confirmDownload = (options: Record<string, unknown>) => {
+    const batch = downloadBatch
+    setDownloadBatch(null)
+    setMode('browse')
+    if (!batch) return
     let added = 0
-    const cannot: string[] = []
-    for (const grp of groups.values()) {
+    for (const grp of batch.values()) {
       const dl = runnableCommand(grp.platform, 'item download')
-      if (dl) added += queue.add(grp.platform, dl, grp.items)
-      else cannot.push(grp.platform.name)
+      if (dl) added += queue.add(grp.platform, dl, grp.items, options)
     }
-    const tail = cannot.length ? `；${cannot.join('、')}不能在界面里下载` : ''
-    if (added) setPhase({ ...phase, marked: new Set() })
-    setNote(added ? `已加入下载 ${added} 条，保存到 ${dirRef.current}，按 D 看进度${tail}` : tail ? tail.slice(1) : '这一项没法下载')
+    if (added && phase.type === 'results') setPhase({ ...phase, marked: new Set() })
+    setNote(added ? `已加入下载 ${added} 条，保存到 ${dirRef.current}，按 D 看进度` : '这一项没法下载')
   }
 
   /** 打开评论页或媒体页：只对一条内容（Item）有意义。 */
@@ -915,6 +929,7 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
         openSetup()
       } else if (key.escape || key.return || input === 'q') setPhase({ type: 'browse' })
       else if (input === 'r') submit()
+      else if (input === 'o' && phase.verifyUrl) void openUrl(phase.verifyUrl).then((ok) => setNote(ok ? '已在浏览器打开' : '没能打开浏览器'))
       return
     }
 
@@ -1020,7 +1035,7 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
           onError={(e) => {
             setListening(null)
             setMode('browse')
-            setPhase({ type: 'error', code: e.code, message: e.message, hint: e.hint, exit: e.exitCode })
+            setPhase({ type: 'error', code: e.code, message: e.message, hint: e.hint, exit: e.exitCode, verifyUrl: verifyUrlOf(e.detail) })
           }}
         />
       </Box>
@@ -1032,6 +1047,10 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
   const leaveScreen = () => setMode('browse')
   let screen: React.ReactNode = null
   if (mode === 'downloads') screen = <DownloadsScreen queue={queue} dir={downloadDir} cols={columns} rows={belowHeader} onExit={leaveScreen} />
+  else if (mode === 'download-options' && downloadBatch) {
+    const count = [...downloadBatch.values()].reduce((n, grp) => n + grp.items.length, 0)
+    screen = <DownloadOptionsScreen count={count} cols={columns} rows={belowHeader} onStart={confirmDownload} onExit={() => { setDownloadBatch(null); leaveScreen() }} />
+  }
   else if (mode === 'settings') screen = <SettingsScreen cols={columns} rows={belowHeader} downloadDir={downloadDir} onDownloadDir={setDownloadDir} light={light} onToggleTheme={toggleTheme} onExit={leaveScreen} />
   else if (mode === 'aggregate') screen = <AggregateScreen rowsOfPlatforms={platformList} logs={logs} accountOf={accountFor} cols={columns} rows={belowHeader} onResults={showAggregate} onExit={leaveScreen} />
   else if (target && (mode === 'comments' || mode === 'media')) {
@@ -1097,7 +1116,18 @@ function Shell({ logs, platforms, light, toggleTheme }: { logs: LogBuffer; platf
   } else if (phase.type === 'error') {
     body = <ErrorView phase={phase} cols={columns} rows={bodyRows} platform={platform} />
     const needLogin = (phase.code === 'AUTH_REQUIRED' || phase.code === 'AUTH_EXPIRED') && canLogin
-    keys = <Keys cols={columns - 2} items={needLogin ? [['Enter', '去登录'], ['r', '重试'], ['Esc', '返回']] : [['r', '重试'], ['Esc', '返回']]} />
+    keys = (
+      <Keys
+        cols={columns - 2}
+        items={
+          needLogin
+            ? [['Enter', '去登录'], ['r', '重试'], ['Esc', '返回']]
+            : phase.verifyUrl
+              ? [['o', '浏览器打开'], ['r', '重试'], ['Esc', '返回']]
+              : [['r', '重试'], ['Esc', '返回']]
+        }
+      />
+    )
   } else if (phase.type === 'results' && mode === 'json') {
     const text = JSON.stringify(rawOf(phase.results.items[phase.selected]), null, 2) ?? ''
     body = <JsonView text={text} cols={columns} rows={bodyRows} />
@@ -1234,6 +1264,13 @@ function ErrorView({ phase, cols, rows, platform }: { phase: Extract<Phase, { ty
         <Box paddingLeft={2} paddingTop={1}>
           <T c="dim">{'在终端运行：'}</T>
           <T c="accent">{clip(phase.hint, cols - 20, g.more)}</T>
+        </Box>
+      ) : null}
+      {phase.verifyUrl ? (
+        <Box flexDirection="column" paddingLeft={2} paddingTop={1}>
+          <T c="dim">{'去验证：'}</T>
+          <T c="sky">{clip(phase.verifyUrl, cols - 6, g.more)}</T>
+          <T c="dim">按 o 在浏览器打开，验证通过后回来按 r 重试</T>
         </Box>
       ) : null}
       {need ? (
