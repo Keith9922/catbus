@@ -59,6 +59,7 @@
 
 ### Fixed
 
+- 打包：`tsc` 编译会去掉 `dist/cli/main.js` 的可执行权限，`npm run build` 新增 `scripts/postbuild.mjs` 重新加上（0o755），否则全局安装后 `catbus` 这个 bin 符号链接打不开（`Permission denied`）
 - xhs：扫码确认后的短信人机验证适配主站 2026-11-09 实测的新协议（HTTP 471，`verifyType 213` 登录强制短信验证，替代 0.3.0 适配的验证页链 120）。在登录链的会话上直接验证（不重建验证页会话、无 vc/init），验证码发到输入的手机号（`--phone` 或终端输入，需与账号绑定手机一致；非交互下与验证码一起从 stdin 读两行）；getverifyuserinfo / vc/send / vc/check 的请求键序照实测。120 链保留：服务端按环境在两条验证间切换。短信登录（`--method sms`）的独立链路不变
 - tui：结果列表每行多算了 1 列，选中行最左边的标记被挤掉
 - tui：帮助页里两条 `Enter` 用了同一个 key，内容会错位重叠；帮助在 80 × 24 的窗口里放不下时可以滚动
