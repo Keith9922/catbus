@@ -1,6 +1,6 @@
 import { getCurrent } from '../core/auth-store.js'
 import { describeOption, flagName, type LoginMethod, PAGING } from '../core/options.js'
-import { type AvailableEndpoint, type Command, type Platform, sortCommands } from '../core/registry.js'
+import { type AvailableEndpoint, type Command, type Endpoint, type Platform, sortCommands } from '../core/registry.js'
 import { PLATFORMS } from '../platforms/index.js'
 
 // 界面的数据模型：全部从注册表算出来，不含 React（AGENTS 4.13）。
@@ -8,8 +8,14 @@ import { PLATFORMS } from '../platforms/index.js'
 /** 界面里能运行的动作（AGENTS 4.13）。其余命令只显示等价的 CLI 命令。 */
 export const READ_ACTIONS: ReadonlySet<string> = new Set([
   'get', 'list', 'search', 'related', 'media', 'items', 'replies', 'categories', 'suggest', 'hot', 'count', 'history',
-  'status', 'price', 'likes', 'collects', 'reposts', 'followers', 'following', 'rank', 'gifts', 'products', 'replays', 'subtitles', 'stats',
+  'status', 'price', 'likes', 'collects', 'reposts', 'followers', 'following', 'rank', 'gifts', 'products', 'replays', 'subtitles', 'stats', 'settings', 'pins',
 ])
+
+/**
+ * 界面里能运行的下载动作（AGENTS 4.13）：只把文件写到本机，不改平台上的数据，所以不需要 4.11 的确认。
+ * 和读取类动作分开放：规范和在线测试里的“读取类”只指 READ_ACTIONS。
+ */
+export const DOWNLOAD_ACTIONS: ReadonlySet<string> = new Set(['download'])
 
 /** 登录方式的中文名（登录页的选项、账号页的方式列）。 */
 export const METHOD_LABEL: Record<LoginMethod, string> = {
@@ -22,11 +28,11 @@ export const METHOD_LABEL: Record<LoginMethod, string> = {
   token: '导入凭证',
 }
 
-/** 能在界面里一次取回结果：已实现、动作在读取类集合里，且不是长连接、不需要确认。 */
+/** 能在界面里一次取回结果：已实现、动作是读取类或下载，且不是长连接、不需要确认。 */
 export function runnable(command: Command): boolean {
   if (command.status !== 'implemented') return false
   if (command.stream || command.confirm) return false
-  return READ_ACTIONS.has(command.action)
+  return READ_ACTIONS.has(command.action) || DOWNLOAD_ACTIONS.has(command.action)
 }
 
 /** 长连接的监听：界面里显示成滚动的事件流（AGENTS 4.13）。 */
@@ -53,14 +59,34 @@ export interface Group {
   commands: Command[]
 }
 
-export function webEndpoint(platform: Platform): AvailableEndpoint | null {
-  const ep = platform.endpoints.web
+/**
+ * 界面用的端：平台的默认端（AGENTS 4.3）。多数平台是 web，discord 是 pc。界面里所有按平台取命令、取账号、
+ * 登录、运行命令的地方都经这里，不要再写死 `web`：新平台声明了别的默认端，界面就自动跟着。
+ */
+export function endpointOf(platform: Platform): Endpoint {
+  return platform.defaultEndpoint
+}
+
+/** 界面用的端的声明；该端还没实现为 null。 */
+export function activeEndpoint(platform: Platform): AvailableEndpoint | null {
+  const ep = platform.endpoints[endpointOf(platform)]
   return ep === 'planned' ? null : ep
+}
+
+/** 本平台（默认端）能在界面里运行的某条命令；没有或不能运行时为 null。 */
+export function runnableCommand(platform: Platform, key: string): Command | null {
+  const c = activeEndpoint(platform)?.commands.get(key)
+  return c && runnable(c) ? c : null
+}
+
+/** 平台的“搜索”入口（按 s、聚合搜索用）：能运行的 item search；没有就用推荐流 feed list；都没有为 null。 */
+export function primaryCommand(platform: Platform): Command | null {
+  return runnableCommand(platform, 'item search') ?? runnableCommand(platform, 'feed list')
 }
 
 /** 按 resource 分组，顺序与 `--help` 一致；auth 不在命令栏里出现（登录在终端里做）。 */
 export function groupCommands(platform: Platform): Group[] {
-  const ep = webEndpoint(platform)
+  const ep = activeEndpoint(platform)
   if (!ep) return []
   const groups = new Map<string, Command[]>()
   for (const c of sortCommands(ep.commands.values())) {
@@ -74,9 +100,9 @@ export function groupCommands(platform: Platform): Group[] {
 
 export interface PlatformRow {
   platform: Platform
-  /** 已实现的 web 端命令数（不含 auth）。 */
+  /** 已实现的命令数（默认端，不含 auth）。 */
   implemented: number
-  /** 免登录可用：web 端所有已实现的命令都不要求登录。 */
+  /** 免登录可用：默认端所有已实现的命令都不要求登录。 */
   open: boolean
   /** 当前账号名；没有为 null。 */
   account: string | null
@@ -86,9 +112,9 @@ export interface PlatformRow {
 export async function platformRows(platforms: Platform[] = PLATFORMS): Promise<PlatformRow[]> {
   return Promise.all(
     platforms.map(async (platform) => {
-      const ep = webEndpoint(platform)
+      const ep = activeEndpoint(platform)
       const commands = ep ? [...ep.commands.values()].filter((c) => c.resource !== 'auth' && c.status === 'implemented') : []
-      const current = ep ? await getCurrent(platform.id, 'web').catch(() => null) : null
+      const current = ep ? await getCurrent(platform.id, endpointOf(platform)).catch(() => null) : null
       return {
         platform,
         implemented: commands.length,

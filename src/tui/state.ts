@@ -55,18 +55,38 @@ export interface Results {
   single: boolean
   page: RunResult['page']
   account: string | null
+  /** 聚合搜索：每一项来自哪个平台、哪条命令，与 items 一一对应。普通结果没有（见 originOf）。 */
+  origins?: Origin[]
+  /** 列表下方要提示的话，例如聚合搜索里失败的平台。 */
+  notes?: string[]
+}
+
+export interface Origin {
+  platform: Platform
+  command: Command
+}
+
+/** 第 i 项来自哪个平台、哪条命令：聚合搜索按 origins，普通结果就是这次运行的平台和命令。 */
+export function originOf(r: Results, i: number): Origin {
+  return r.origins?.[i] ?? { platform: r.platform, command: r.command }
 }
 
 export type Phase =
   | { type: 'browse' }
   | { type: 'running'; label: string }
-  | { type: 'results'; results: Results; selected: number; top: number; loadingMore: boolean }
-  | { type: 'error'; code: string; message: string; hint: string | null; exit: number }
+  | { type: 'results'; results: Results; selected: number; top: number; loadingMore: boolean; marked?: ReadonlySet<number> }
+  | { type: 'error'; code: string; message: string; hint: string | null; exit: number; verifyUrl: string | null }
 
 /** 把一次运行的结果摊成列表：列表命令是数组，其余是单个对象（`single`）。 */
 export function toItems(data: unknown): { items: unknown[]; single: boolean } {
   if (Array.isArray(data)) return { items: data, single: false }
   return { items: data == null ? [] : [data], single: true }
+}
+
+/** 风控错误自带的网页验证链接（`detail.verify_url`，AGENTS 6.4）：没有或不是 https 地址时为 null。 */
+export function verifyUrlOf(detail: unknown): string | null {
+  const url = (detail as { verify_url?: unknown } | null)?.verify_url
+  return typeof url === 'string' && url.startsWith('https://') ? url : null
 }
 
 // ---- 窄终端 ----

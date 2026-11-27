@@ -248,7 +248,7 @@ export function BrowseKeys({ cols, pane, canRun }: { cols: number; pane: string;
   const items: [string, string][] =
     pane === 'form'
       ? [['Tab', '下一项'], ['←→', '选值'], ...(canRun ? ([['Enter', '运行']] as [string, string][]) : []), ['c', '复制命令'], ['Esc', '返回']]
-      : [['↑↓', '移动'], ['→ Enter', pane === 'platforms' ? '进入命令' : '展开/填参数'], ['/', '命令面板'], ['a', '账号'], ['c', '复制命令'], ['?', '帮助'], ['q', '退出']]
+      : [['↑↓', '移动'], ['→ Enter', pane === 'platforms' ? '进入命令' : '展开/填参数'], ['s', '搜索'], ['/', '命令面板'], ['A', '聚合搜索'], ['a', '账号'], ['D', '下载'], ['S', '设置'], ['?', '帮助'], ['q', '退出']]
   return <Keys items={items} cols={cols} />
 }
 

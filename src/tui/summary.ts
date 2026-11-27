@@ -20,7 +20,7 @@ const isObj = (v: unknown): v is Obj => v != null && typeof v === 'object' && !A
 const str = (v: unknown): string => (v == null ? '' : String(v))
 const name = (u: any): string => (isObj(u) ? str(u.name ?? u.id) : '')
 
-export type Kind = 'ticket' | 'stop' | 'transfer' | 'station' | 'item' | 'user' | 'comment' | 'live' | 'keyword' | 'named' | 'generic'
+export type Kind = 'ticket' | 'stop' | 'transfer' | 'station' | 'item' | 'user' | 'comment' | 'live' | 'keyword' | 'file' | 'named' | 'generic'
 
 export function kindOf(o: unknown): Kind {
   if (!isObj(o)) return 'generic'
@@ -33,6 +33,7 @@ export function kindOf(o: unknown): Kind {
   if ('item_id' in o && 'text' in o && !('offset' in o)) return 'comment'
   if ('host' in o && 'status' in o) return 'live'
   if ('heat' in o && 'text' in o) return 'keyword'
+  if ('path' in o && 'size' in o && 'type' in o) return 'file'
   if ('name' in o && 'id' in o) return 'named'
   return 'generic'
 }
@@ -143,6 +144,12 @@ export function columnsFor(rows: unknown[], room = 100): Col[] {
         { head: '关键词', width: 'flex', get: (o) => str(o.text) },
         { head: '热度', width: 9, align: 'right', get: (o) => count(o.heat) },
       ]
+    case 'file':
+      return [
+        { head: '文件', width: 'flex', get: (o) => str(o.path) },
+        { head: '类型', width: 6, get: (o) => str(o.type), tone: () => 'dim' },
+        { head: '大小', width: 9, align: 'right', get: (o) => bytes(o.size) },
+      ]
     case 'named':
       return [
         { head: '名称', width: 'flex', get: (o) => str(o.name) },
@@ -154,6 +161,19 @@ export function columnsFor(rows: unknown[], room = 100): Col[] {
         { head: '内容', width: 'flex', get: (o) => (isObj(o) ? summarizeLine(o) : str(o)) },
       ]
   }
+}
+
+/** 字节数写成 B / KB / MB / GB。不是有限数字时为 `-`。 */
+export function bytes(n: unknown): string {
+  if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = n
+  let u = 0
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024
+    u++
+  }
+  return `${u === 0 ? v : v.toFixed(1)} ${units[u]}`
 }
 
 /** 通用一行摘要：挑第一个有内容的“主要”字段。 */
@@ -173,6 +193,7 @@ export interface Line {
 }
 
 const SKIP = new Set(['media', 'cover', 'raw'])
+const USER_REF_KEYS = new Set(['id', 'name', 'url', 'avatar'])
 
 function scalar(v: unknown, key: string): string | null {
   if (v == null || v === '') return null
@@ -223,7 +244,8 @@ export function flatten(o: unknown, prefix = '', out: Line[] = [], depth = 0): L
         out.push({ key, value: `${v.min}+` })
         continue
       }
-      if ('id' in v && 'name' in v && 'url' in v && Object.keys(v).length === 3) {
+      // UserRef（AGENTS 6.2）：id name url，后来加了 avatar；写成“名字（id）”一行
+      if ('id' in v && 'name' in v && 'url' in v && Object.keys(v).every((x) => USER_REF_KEYS.has(x))) {
         out.push({ key, value: v.name ? `${v.name}（${v.id}）` : str(v.id) })
         continue
       }

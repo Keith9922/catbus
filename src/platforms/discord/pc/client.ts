@@ -1,6 +1,7 @@
 import { arch, platform, release } from 'node:os'
 import { CatbusError } from '../../../core/errors.js'
 import { type HeaderPairs, HttpClient, type HttpResponse } from '../../../core/http.js'
+import { uiInstalled } from '../../../core/login.js'
 import { jsonDumps, jsonLoads, type PairsInit, toPairs } from '../../../core/py.js'
 import { now, uuid4 } from '../../../core/rand.js'
 import type { HandlerContext } from '../../../core/registry.js'
@@ -134,7 +135,9 @@ export class DiscordClient {
       try {
         return await this.requestOnce<T>(method, path, options, captchaHeaders)
       } catch (error) {
-        if (!(error instanceof CaptchaRequired) || !options.captcha || (!process.stderr.isTTY && !this.ctx.options.captcha)) throw error
+        // 能让用户在浏览器里完成：stderr 是终端、给了 --captcha，或者终端界面接管了登录（界面里链接显示在页面上，不依赖 stderr）
+        const canSolve = process.stderr.isTTY || this.ctx.options.captcha || uiInstalled()
+        if (!(error instanceof CaptchaRequired) || !options.captcha || !canSolve) throw error
         if (attempt >= 2) throw new CatbusError('RISK_CONTROL', 'Discord 未接受两次人工验证码提交', { detail: { kind: 'captcha' } })
         const { solveCaptcha } = await import('./captcha.js')
         captchaHeaders = await solveCaptcha(this.ctx, error.challenge)

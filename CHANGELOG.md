@@ -8,6 +8,20 @@
 
 ### Added
 
+- tui：下载前多一个选项面板（`d` 打开），对应 `item download` 的 `--meta`、`--comments`、`--replies`、`--no-media`：只要信息、写信息、导出评论条数（或 `all`）、评论的回复条数（或 `all`），`Esc` 取消不加入队列，评论条数非正整数或 `all` 时报错不开始；之前按 `d` 直接下载，没法带这些选项
+- tui：风控错误带网页验证链接（`detail.verify_url`，WebUI 的 VerifyDialog.vue 同一个约定）时，错误页显示「去验证」和链接，按 `o` 用浏览器打开；没有链接时不显示
+- tui：评论区筛选，与网页界面对齐（AGENTS 4.13）。已加载的顶层评论达到 5 条时，评论页按 `/` 搜索正文或作者昵称、`s` 循环排序（默认 / 最热 / 最新）、`c` 清除；只作用于已加载的评论，不发请求、不改翻页，楼中楼跟着它所属的评论走
+- tui：按平台的默认端取命令、账号和登录（discord 是 `pc`，其余是 `web`）。之前写死 `web`，合并 discord 后它在界面里一条命令都没有；顶栏写出当前端的名字。Discord 登录里的两处交互走界面：导入凭证时隐藏输入令牌，人机验证的链接显示在页面上（可按 `o` 打开），CLI 下 stderr 的文字不变
+- tui：`account settings`、`msg pins` 等 discord 的只读命令列入界面里能运行的读取类动作；动作归属的守护测试改为看每个平台的默认端，以后新平台的新动作会被它提醒登记
+- `catbus tui` 补齐网页界面（PR #57）有的功能：
+  - 下载：结果页空格 / `v` 选择、`d` 下载，`D` 看进度；后台一条一条地下，遇到风控或登录问题时同一平台剩下的先暂停，`r` 重试。下载目录默认是启动时的目录，设置里可以改
+  - 评论：结果页 `m` 打开评论，翻到底取下一页，`Enter` 展开楼中楼（只在展开时取）
+  - 媒体：结果页 `i` 列出图片、视频地址，用浏览器打开
+  - 聚合搜索：浏览页 `A`，一个关键词同时搜几个平台，结果轮流排在一个列表里、标出平台，失败的平台写在下面
+  - 本次浏览账号：账号页 `b`，之后的命令带 `-a`，不改当前账号
+  - 设置：`S`，代理、超时写进 `config.toml`（与 `catbus config set` 同一套校验），下载目录、主题只在这次运行里有效
+  - 搜索入口与回到结果：浏览页 `s` 直达本平台的搜索，`r` 回到上一次的结果
+  - 规范（AGENTS 4.13）：`download` 列入界面里能运行的命令
 - bilibili、weibo、douyin、kuaishou：`keyword hot`（热搜榜），输出 Keyword[]，`heat` 为热度值（快手的「1113.8万」换算成整数），按榜单顺序，不含置顶词。上游都没有热搜接口，请求按各自网页端补的，没有对拍：bilibili 是搜索框的 `x/web-interface/wbi/search/square`（最多 50 条）；weibo 是热搜榜 `ajax/side/hotSearch`（去掉广告位）；douyin 是热榜页的 `aweme/v1/web/hot/search/list`（不含实时上升热点）；kuaishou 是旧版网页端首页的 GraphQL `visionHotRank`（新版网页端已不展示热榜，接口随时可能下线）
 - 新增 `discord` 平台：按 macOS 桌面协议连接，默认使用 `pc` 端，支持扫码、账号密码及 Token 登录、服务器与频道、消息与附件、好友和表情回应、实时消息。支持人工验证码与通行密钥验证；旧版 web 登录信息会迁移至 pc。验证范围与限制见 `docs/platforms/discord.md`。
 - mteam：`item download --qbit` 的推送结果进入信封：成功时 `data` 为 `{id files qbit}`，`qbit.status` 为 `added` 或 `exists`（已在任务列表）；推送失败时报 `NETWORK` / `ERROR` / `UPSTREAM`，`error.detail` 为 `{qbit: "failed", id, files, http_status}`，列出已保存的种子文件。`bonus history` 的 `note` 去掉站点原文里的 IP 和 `[TID=…]` 等标记，促销、考核标签转成中文；`url` 改为相关种子的详情页（原来 `TRACKER` 记录总是 null）
@@ -48,7 +62,12 @@
 
 ### Fixed
 
+- 打包：`tsc` 编译会去掉 `dist/cli/main.js` 的可执行权限，`npm run build` 新增 `scripts/postbuild.mjs` 重新加上（0o755），否则全局安装后 `catbus` 这个 bin 符号链接打不开（`Permission denied`）
 - xhs：扫码确认后的短信人机验证适配主站 2026-11-09 实测的新协议（HTTP 471，`verifyType 213` 登录强制短信验证，替代 0.3.0 适配的验证页链 120）。在登录链的会话上直接验证（不重建验证页会话、无 vc/init），验证码发到输入的手机号（`--phone` 或终端输入，需与账号绑定手机一致；非交互下与验证码一起从 stdin 读两行）；getverifyuserinfo / vc/send / vc/check 的请求键序照实测。120 链保留：服务端按环境在两条验证间切换。短信登录（`--method sms`）的独立链路不变
+- tui：结果列表每行多算了 1 列，选中行最左边的标记被挤掉
+- tui：帮助页里两条 `Enter` 用了同一个 key，内容会错位重叠；帮助在 80 × 24 的窗口里放不下时可以滚动
+- tui：作者等用户引用多了 `avatar` 字段后，详情里拆成了 4 行，现在仍合成「名字（id）」一行
+- tui：结果页按键提示里 `Enter` 写成了「详情」，实际是「接着做」
 
 ## [0.3.0] - 2026-11-05
 

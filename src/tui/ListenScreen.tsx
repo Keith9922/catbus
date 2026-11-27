@@ -6,7 +6,7 @@ import type { Command, Platform } from '../core/registry.js'
 import { copyText } from './clipboard.js'
 import { cliFromInvocation } from './model.js'
 import { ListenKeys, ListenView, type ListenState } from './ListenView.js'
-import { type ListenHandle, type Line, EVENT_TYPES, pushLine, startListen, toLine } from './listen.js'
+import { type ListenHandle, type ListenRequest, type Line, EVENT_TYPES, pushLine, startListen, toLine } from './listen.js'
 import { type LogBuffer, bufferLogger } from './logs.js'
 import { T, useGlyphs, useLook } from './ui.js'
 
@@ -31,6 +31,7 @@ export function ListenScreen({
   command,
   words,
   given,
+  account,
   logs,
   cols,
   rows,
@@ -41,6 +42,8 @@ export function ListenScreen({
   command: Command
   words: string[]
   given: Record<string, unknown>
+  /** 本次浏览用的账号（-a）；不给时用当前账号。 */
+  account?: string | undefined
   logs: LogBuffer
   cols: number
   rows: number
@@ -72,7 +75,9 @@ export function ListenScreen({
     setState(INITIAL(null))
     ;(async () => {
       try {
-        const h = await startListen({ platform, command, words, given, log: bufferLogger(logs) }, (value) => {
+        const req: ListenRequest = { platform, command, words, given, log: bufferLogger(logs) }
+        if (account) req.account = account
+        const h = await startListen(req, (value) => {
           pending.current.push(toLine(value, ++seq.current, new Date()))
         })
         if (!alive) {

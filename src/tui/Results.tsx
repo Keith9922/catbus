@@ -1,19 +1,23 @@
 import { Box } from 'ink'
 import { type Col, columnsFor, flatten, kindOf, linkOf, wrap } from './summary.js'
-import { type Results as ResultsData } from './state.js'
+import { originOf, type Results as ResultsData } from './state.js'
 import { Keys, Pane, T, useGlyphs, useLook } from './ui.js'
 import { clip, padEnd, padStart, width } from './text.js'
 
 // 结果页：左边列表，右边选中项的字段（AGENTS 4.13）。宽度不够时只显示列表，Enter 进入详情。
 
 function colWidths(cols: Col[], total: number): number[] {
-  const fixed = cols.reduce((n, c) => n + (c.width === 'flex' ? 0 : c.width + 1), 0)
+  // 每一列（包括 flex 列）右边都有 1 列间距；少算 flex 列那一格时整行多出 1 列，最左边的选中标记会被挤掉
+  const fixed = cols.reduce((n, c) => n + (c.width === 'flex' ? 0 : c.width) + 1, 0)
   const flex = Math.max(8, total - fixed)
   return cols.map((c) => (c.width === 'flex' ? flex : c.width))
 }
 
 /** 列表里能显示几行数据：高度减去标题线、底边框和表头。 */
 export const listVisible = (height: number): number => Math.max(1, height - 3)
+
+/** 这份结果能显示几行：有提示行（聚合搜索里失败的平台）时再少一行。App 的翻页和滚动用同一个数。 */
+export const resultsVisible = (data: ResultsData, height: number): number => Math.max(1, listVisible(height) - (data.notes?.length ? 1 : 0))
 
 const fmtHead = (c: Col, w: number) => (c.align === 'right' ? padStart(c.head, w) : padEnd(c.head, w))
 
@@ -25,6 +29,7 @@ export function ResultsView({
   rows,
   detail,
   loadingMore,
+  marked,
 }: {
   data: ResultsData
   selected: number
@@ -34,6 +39,8 @@ export function ResultsView({
   /** 窄终端下进入详情后，整屏显示详情。 */
   detail: boolean
   loadingMore: boolean
+  /** 多选（空格）的条目下标。 */
+  marked?: ReadonlySet<number> | undefined
 }) {
   const g = useGlyphs()
   const look = useLook()
@@ -42,16 +49,26 @@ export function ResultsView({
   const detailCols = cols - listCols
   const bodyRows = rows
   const inner = listCols - 2
-  const columns = columnsFor(data.items, inner - 1)
-  const widths = colWidths(columns, inner - 1)
-  const visible = listVisible(rows)
+  // 聚合搜索多一列平台；有选中的条目时多一列勾选标记
+  const originW = data.origins ? 9 : 0
+  const markW = marked?.size ? 2 : 0
+  const room = inner - 1 - originW - markW
+  const columns = columnsFor(data.items, room)
+  const widths = colWidths(columns, room)
+  const visible = resultsVisible(data, rows)
+  const noteLine = data.notes?.length ? data.notes.join('；') : null
   const slice = data.items.slice(top, top + visible)
   const sel = data.items[selected]
 
   const list = (
-    <Pane title={`${data.single ? '结果' : `${data.command.resource} ${data.command.action}`} · ${data.items.length}${data.page?.has_more ? '+' : ''}`} cols={listCols} rows={bodyRows} focused={!detail}>
+    <Pane title={`${data.origins ? '聚合搜索' : data.single ? '结果' : `${data.command.resource} ${data.command.action}`} · ${data.items.length}${data.page?.has_more ? '+' : ''}${marked?.size ? ` · 已选 ${marked.size}` : ''}`} cols={listCols} rows={bodyRows} focused={!detail}>
       <Box width={inner} height={1}>
-        <T c="dim">{' '}</T>
+        <T c="dim">{' ' + ' '.repeat(markW)}</T>
+        {originW ? (
+          <Box marginRight={1} width={originW - 1} height={1} flexShrink={0}>
+            <T c="dim">{padEnd('平台', originW - 1)}</T>
+          </Box>
+        ) : null}
         {columns.map((c, i) => (
           <Box key={c.head} marginRight={1} width={widths[i]} height={1} overflow="hidden" flexShrink={0}>
             <T c="dim">{fmtHead(c, widths[i]!)}</T>
@@ -64,6 +81,12 @@ export function ResultsView({
         return (
           <Box key={idx} width={inner} height={1} overflow="hidden" backgroundColor={on && !look.mono ? look.palette.sel : undefined}>
             <T c="accent">{on ? g.caret : ' '}</T>
+            {markW ? <T c="green">{marked!.has(idx) ? (look.ascii ? '* ' : '✓ ') : '  '}</T> : null}
+            {originW ? (
+              <Box marginRight={1} width={originW - 1} height={1} overflow="hidden" flexShrink={0}>
+                <T c="sub">{padEnd(originOf(data, idx).platform.name, originW - 1, g.more)}</T>
+              </Box>
+            ) : null}
             {columns.map((c, j) => {
               const text = c.get(item)
               const tone = c.tone?.(item)
@@ -79,6 +102,11 @@ export function ResultsView({
           </Box>
         )
       })}
+      {noteLine ? (
+        <Box width={inner} height={1} overflow="hidden">
+          <T c="yellow">{' ' + clip(noteLine, inner - 2, g.more)}</T>
+        </Box>
+      ) : null}
       {loadingMore ? (
         <Box width={inner}>
           <T c="accent">{' ' + g.spin[0]}</T>
@@ -125,9 +153,12 @@ function detailTitle(sel: unknown): string {
   return `${label[kind] ?? '详情'}${link && link.length < 24 ? ' · ' + link : ''}`
 }
 
-export function ResultKeys({ cols, canMore, split }: { cols: number; canMore: boolean; split: boolean }) {
-  const items: [string, string][] = [['j k', '移动'], ['Enter', split ? '全屏详情' : '详情']]
+export function ResultKeys({ cols, canMore, split, canDownload, canComments }: { cols: number; canMore: boolean; split: boolean; canDownload: boolean; canComments: boolean }) {
+  const items: [string, string][] = [['j k', '移动'], ['Enter', '接着做']]
+  if (canDownload) items.push(['空格', '选择'], ['d', '下载'])
+  if (canComments) items.push(['m', '评论'])
+  items.push(['i', '媒体'])
   if (canMore) items.push(['n', '下一页'])
-  items.push(['o', '浏览器打开'], ['y', '复制链接'], ['c', '复制命令'], ['J', '原始 JSON'], ['Esc', '返回'])
+  items.push(['l', split ? '原始 JSON' : '详情'], ['o', '浏览器打开'], ['y', '复制链接'], ['c', '复制命令'], ['Esc', '返回'])
   return <Keys items={items} cols={cols} />
 }
